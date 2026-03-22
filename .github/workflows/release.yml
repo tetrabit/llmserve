@@ -61,7 +61,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -116,7 +116,7 @@ jobs:
           echo "CHECKSUM_PATH=${RUNNER_TEMP}/${ASSET_NAME}${ARCHIVE_EXT}.sha256" >> "$GITHUB_ENV"
 
       - name: Upload artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: ${{ env.ASSET }}
           path: |
@@ -129,7 +129,7 @@ jobs:
 
     steps:
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: artifacts
 
@@ -147,7 +147,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
@@ -161,7 +161,7 @@ jobs:
 
     steps:
       - name: Checkout tap
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
           repository: AlexsJones/homebrew-llmserve
           token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
