@@ -79,7 +79,14 @@ fn find_binary(name: &str) -> Option<String> {
         .output()
         .ok()
         .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).lines().next().unwrap_or("").trim().to_string())
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_string()
+        })
         .filter(|s| !s.is_empty())
 }
 
@@ -202,8 +209,7 @@ fn detect_koboldcpp() -> DetectedBackend {
     let binary = find_binary("koboldcpp");
 
     // Also check for a running KoboldCpp server (default port 5001)
-    let url =
-        std::env::var("KOBOLDCPP_HOST").unwrap_or_else(|_| "http://localhost:5001".into());
+    let url = std::env::var("KOBOLDCPP_HOST").unwrap_or_else(|_| "http://localhost:5001".into());
     let agent = http_agent();
     let server_running = agent.get(&format!("{url}/api/v1/model")).call().is_ok();
 
