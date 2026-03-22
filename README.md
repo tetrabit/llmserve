@@ -18,6 +18,8 @@ It auto-detects locally installed inference engines (llama-server, KoboldCpp, Lo
 
 > **Sister project:** Use [llmfit](https://github.com/AlexsJones/llmfit) to figure out *which* models fit your hardware, then use llmserve to actually *run* them.
 
+![demo](demo.png)
+
 ---
 
 ## Install
