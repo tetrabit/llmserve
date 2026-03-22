@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>llmserve</title>
+  <meta name="description" content="TUI for serving local LLM models. Pick a model, pick a backend, serve it.">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #0d1117;
+      color: #c9d1d9;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      min-height: 100vh;
+      padding: 2rem;
+    }
+    .container {
+      max-width: 600px;
+      text-align: center;
+    }
+    .icon {
+      width: 96px;
+      height: 96px;
+      margin-bottom: 1.5rem;
+    }
+    h1 {
+      font-size: 2.5rem;
+      color: #f0f6fc;
+      margin-bottom: 0.5rem;
+    }
+    .tagline {
+      color: #8b949e;
+      font-size: 1.1rem;
+      margin-bottom: 2rem;
+    }
+    .install-box {
+      background: #161b22;
+      border: 1px solid #30363d;
+      border-radius: 8px;
+      padding: 1rem 1.5rem;
+      margin-bottom: 1.5rem;
+      text-align: left;
+    }
+    .install-box label {
+      display: block;
+      color: #8b949e;
+      font-size: 0.85rem;
+      margin-bottom: 0.5rem;
+    }
+    .install-box code {
+      display: block;
+      font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+      font-size: 0.9rem;
+      color: #79c0ff;
+      word-break: break-all;
+    }
+    .install-box + .install-box { margin-top: 1rem; }
+    .links {
+      margin-top: 1.5rem;
+    }
+    .links a {
+      color: #58a6ff;
+      text-decoration: none;
+      margin: 0 0.75rem;
+      font-size: 0.95rem;
+    }
+    .links a:hover { text-decoration: underline; }
+    .companion {
+      margin-top: 2rem;
+      color: #8b949e;
+      font-size: 0.85rem;
+    }
+    .companion a { color: #58a6ff; text-decoration: none; }
+    .companion a:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <img src="icon.svg" alt="llmserve" class="icon">
+    <h1>llmserve</h1>
+    <p class="tagline">Any model. Any backend. One TUI to serve them all.</p>
+
+    <div class="install-box">
+      <label>Quick install (macOS / Linux)</label>
+      <code>curl -fsSL https://llmserve.axjns.dev/install.sh | sh</code>
+    </div>
+
+    <div class="install-box">
+      <label>Homebrew</label>
+      <code>brew tap AlexsJones/llmserve && brew install llmserve</code>
+    </div>
+
+    <div class="install-box">
+      <label>Cargo</label>
+      <code>cargo install llmserve</code>
+    </div>
+
+    <div class="links">
+      <a href="https://github.com/AlexsJones/llmserve">GitHub</a>
+      <a href="https://github.com/AlexsJones/llmserve/releases">Releases</a>
+      <a href="https://crates.io/crates/llmserve">crates.io</a>
+    </div>
+
+    <p class="companion">
+      Sister project: <a href="https://llmfit.axjns.dev">llmfit</a> — find which models fit your hardware
+    </p>
+  </div>
+</body>
+</html>

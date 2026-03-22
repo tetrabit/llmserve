@@ -1,0 +1,231 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  BINARY: llmserve
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          # Linux x86_64 (static musl)
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            use-cross: true
+
+          # Linux ARM64 (static musl)
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            use-cross: true
+
+          # Linux x86_64 (glibc)
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            use-cross: false
+
+          # Linux ARM64 (glibc)
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            use-cross: true
+
+          # macOS Intel
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            use-cross: false
+
+          # macOS Apple Silicon
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            use-cross: false
+
+          # Windows x86_64
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            use-cross: false
+
+          # Windows ARM64
+          - target: aarch64-pc-windows-msvc
+            os: windows-latest
+            use-cross: false
+
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross
+        if: matrix.use-cross
+        run: cargo install cross --version 0.2.5
+
+      - name: Build
+        shell: bash
+        run: |
+          if [ "${{ matrix.use-cross }}" = "true" ]; then
+            cross build --release --target ${{ matrix.target }}
+          else
+            cargo build --release --target ${{ matrix.target }}
+          fi
+
+      - name: Package
+        shell: bash
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          ASSET_NAME="${BINARY}-${TAG}-${{ matrix.target }}"
+          STAGING="${RUNNER_TEMP}/${ASSET_NAME}"
+          mkdir -p "${STAGING}"
+
+          if [[ "${{ matrix.target }}" == *"windows"* ]]; then
+            EXE_EXT=".exe"
+            ARCHIVE_EXT=".zip"
+            COMPRESS_CMD="7z a ${ASSET_NAME}${ARCHIVE_EXT} ${ASSET_NAME}"
+          else
+            EXE_EXT=""
+            ARCHIVE_EXT=".tar.gz"
+            COMPRESS_CMD="tar czf ${ASSET_NAME}${ARCHIVE_EXT} ${ASSET_NAME}"
+          fi
+
+          cp "target/${{ matrix.target }}/release/${BINARY}${EXE_EXT}" "${STAGING}/"
+          cp README.md LICENSE "${STAGING}/" 2>/dev/null || true
+
+          cd "${RUNNER_TEMP}"
+          $COMPRESS_CMD
+
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "${ASSET_NAME}${ARCHIVE_EXT}" | awk '{print $1 "  " $2}' > "${ASSET_NAME}${ARCHIVE_EXT}.sha256"
+          elif command -v shasum >/dev/null 2>&1; then
+            shasum -a 256 "${ASSET_NAME}${ARCHIVE_EXT}" | awk '{print $1 "  " $2}' > "${ASSET_NAME}${ARCHIVE_EXT}.sha256"
+          fi
+
+          echo "ASSET=${ASSET_NAME}${ARCHIVE_EXT}" >> "$GITHUB_ENV"
+          echo "ASSET_PATH=${RUNNER_TEMP}/${ASSET_NAME}${ARCHIVE_EXT}" >> "$GITHUB_ENV"
+          echo "CHECKSUM_PATH=${RUNNER_TEMP}/${ASSET_NAME}${ARCHIVE_EXT}.sha256" >> "$GITHUB_ENV"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.ASSET }}
+          path: |
+            ${{ env.ASSET_PATH }}
+            ${{ env.CHECKSUM_PATH }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            artifacts/**/*.tar.gz
+            artifacts/**/*.zip
+            artifacts/**/*.sha256
+
+  publish-crate:
+    needs: release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Publish to crates.io
+        run: cargo publish --token ${{ secrets.CARGO_REGISTRY_TOKEN }}
+
+  update-homebrew:
+    needs: release
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout tap
+        uses: actions/checkout@v4
+        with:
+          repository: AlexsJones/homebrew-llmserve
+          token: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+          path: homebrew-tap
+
+      - name: Download release assets and update formula
+        env:
+          TAG: ${{ github.ref_name }}
+        run: |
+          VERSION="${TAG#v}"
+
+          declare -A SHAS
+          for target in aarch64-apple-darwin x86_64-apple-darwin aarch64-unknown-linux-musl x86_64-unknown-linux-musl; do
+            URL="https://github.com/AlexsJones/llmserve/releases/download/${TAG}/llmserve-${TAG}-${target}.tar.gz"
+            echo "Downloading ${URL}..."
+            SHA=$(curl -fsSL "$URL" | shasum -a 256 | awk '{print $1}')
+            SHAS[$target]="$SHA"
+            echo "${target}: ${SHA}"
+          done
+
+          cat > homebrew-tap/Formula/llmserve.rb << RUBY
+          class Llmserve < Formula
+            desc "TUI for serving local LLM models — pick a model, pick a backend, serve it"
+            homepage "https://github.com/AlexsJones/llmserve"
+            version "${VERSION}"
+            license "MIT"
+
+            on_macos do
+              if Hardware::CPU.arm?
+                url "https://github.com/AlexsJones/llmserve/releases/download/v#{version}/llmserve-v#{version}-aarch64-apple-darwin.tar.gz"
+                sha256 "${SHAS[aarch64-apple-darwin]}"
+              else
+                url "https://github.com/AlexsJones/llmserve/releases/download/v#{version}/llmserve-v#{version}-x86_64-apple-darwin.tar.gz"
+                sha256 "${SHAS[x86_64-apple-darwin]}"
+              end
+            end
+
+            on_linux do
+              if Hardware::CPU.arm?
+                url "https://github.com/AlexsJones/llmserve/releases/download/v#{version}/llmserve-v#{version}-aarch64-unknown-linux-musl.tar.gz"
+                sha256 "${SHAS[aarch64-unknown-linux-musl]}"
+              else
+                url "https://github.com/AlexsJones/llmserve/releases/download/v#{version}/llmserve-v#{version}-x86_64-unknown-linux-musl.tar.gz"
+                sha256 "${SHAS[x86_64-unknown-linux-musl]}"
+              end
+            end
+
+            def install
+              bin.install "llmserve"
+            end
+
+            test do
+              assert_match "llmserve", shell_output("#{bin}/llmserve --help")
+            end
+          end
+          RUBY
+
+          sed -i 's/^          //' homebrew-tap/Formula/llmserve.rb
+
+      - name: Commit and push
+        run: |
+          cd homebrew-tap
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Formula/llmserve.rb
+          git commit -m "Update llmserve to ${GITHUB_REF_NAME}"
+          git push
