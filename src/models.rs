@@ -69,8 +69,21 @@ pub fn discover_models(extra_dirs: &[PathBuf]) -> Vec<DiscoveredModel> {
 
     let home = dirs::home_dir().unwrap_or_default();
 
-    // LM Studio models
-    let lmstudio_dir = home.join(".lmstudio").join("models");
+    // LM Studio models — differs by platform
+    let lmstudio_dir = if cfg!(windows) {
+        // Windows: %USERPROFILE%/.lmstudio/models (newer) or %LOCALAPPDATA%/LM Studio/models
+        let primary = home.join(".lmstudio").join("models");
+        if primary.is_dir() {
+            primary
+        } else {
+            dirs::data_local_dir()
+                .unwrap_or_else(|| home.clone())
+                .join("LM Studio")
+                .join("models")
+        }
+    } else {
+        home.join(".lmstudio").join("models")
+    };
     scan_gguf_dir(
         &lmstudio_dir,
         ModelSource::LmStudio,
@@ -78,8 +91,19 @@ pub fn discover_models(extra_dirs: &[PathBuf]) -> Vec<DiscoveredModel> {
         &mut seen_paths,
     );
 
-    // llama.cpp cache
-    let llamacpp_dir = home.join(".cache").join("llm-models");
+    // llama.cpp cache — on Windows use %LOCALAPPDATA%/llm-models as fallback
+    let llamacpp_dir = if cfg!(windows) {
+        let cache = home.join(".cache").join("llm-models");
+        if cache.is_dir() {
+            cache
+        } else {
+            dirs::data_local_dir()
+                .unwrap_or_else(|| home.clone())
+                .join("llm-models")
+        }
+    } else {
+        home.join(".cache").join("llm-models")
+    };
     scan_gguf_dir(
         &llamacpp_dir,
         ModelSource::LlamaCppCache,
@@ -90,7 +114,13 @@ pub fn discover_models(extra_dirs: &[PathBuf]) -> Vec<DiscoveredModel> {
     // HuggingFace cache — MLX models
     let hf_hub = std::env::var("HF_HOME")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| home.join(".cache").join("huggingface").join("hub"));
+        .unwrap_or_else(|_| {
+            if cfg!(windows) {
+                home.join(".cache").join("huggingface").join("hub")
+            } else {
+                home.join(".cache").join("huggingface").join("hub")
+            }
+        });
     scan_mlx_models(&hf_hub, &mut models, &mut seen_paths);
 
     // Extra user-configured directories

@@ -7,6 +7,8 @@ pub enum Backend {
     Ollama,
     MlxLm,
     LmStudio,
+    Vllm,
+    KoboldCpp,
 }
 
 impl Backend {
@@ -16,13 +18,19 @@ impl Backend {
             Backend::Ollama => "Ollama",
             Backend::MlxLm => "MLX",
             Backend::LmStudio => "LM Studio",
+            Backend::Vllm => "vLLM",
+            Backend::KoboldCpp => "KoboldCpp",
         }
     }
 
     pub fn can_serve_gguf(&self) -> bool {
         matches!(
             self,
-            Backend::LlamaServer | Backend::Ollama | Backend::LmStudio
+            Backend::LlamaServer
+                | Backend::Ollama
+                | Backend::LmStudio
+                | Backend::Vllm
+                | Backend::KoboldCpp
         )
     }
 
@@ -58,7 +66,21 @@ pub fn detect_backends() -> Vec<DetectedBackend> {
         detect_ollama(),
         detect_mlx(),
         detect_lmstudio(),
+        detect_vllm(),
+        detect_koboldcpp(),
     ]
+}
+
+/// Cross-platform binary lookup. Uses `which` on Unix and `where` on Windows.
+fn find_binary(name: &str) -> Option<String> {
+    let cmd = if cfg!(windows) { "where" } else { "which" };
+    Command::new(cmd)
+        .arg(name)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).lines().next().unwrap_or("").trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 /// Returns Ollama model list: Vec<(name, size_bytes)>
@@ -88,12 +110,7 @@ pub fn fetch_ollama_models(api_url: &str) -> Vec<(String, u64)> {
 }
 
 fn detect_llama_server() -> DetectedBackend {
-    let result = Command::new("which")
-        .arg("llama-server")
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string());
+    let result = find_binary("llama-server");
 
     DetectedBackend {
         backend: Backend::LlamaServer,
@@ -146,6 +163,8 @@ pub fn backend_key(backend: &Backend) -> &'static str {
         Backend::Ollama => "ollama",
         Backend::MlxLm => "mlx",
         Backend::LmStudio => "lm-studio",
+        Backend::Vllm => "vllm",
+        Backend::KoboldCpp => "koboldcpp",
     }
 }
 
@@ -162,6 +181,40 @@ fn detect_lmstudio() -> DetectedBackend {
     }
 }
 
+fn detect_vllm() -> DetectedBackend {
+    // Check for running vLLM server first (default port 8000, OpenAI-compatible)
+    let url = std::env::var("VLLM_HOST").unwrap_or_else(|_| "http://localhost:8000".into());
+    let agent = http_agent();
+    let server_running = agent.get(&format!("{url}/v1/models")).call().is_ok();
+
+    // Also check for the vllm binary so we can launch it
+    let binary = find_binary("vllm");
+
+    DetectedBackend {
+        backend: Backend::Vllm,
+        available: server_running || binary.is_some(),
+        binary_path: binary,
+        api_url: Some(url),
+    }
+}
+
+fn detect_koboldcpp() -> DetectedBackend {
+    let binary = find_binary("koboldcpp");
+
+    // Also check for a running KoboldCpp server (default port 5001)
+    let url =
+        std::env::var("KOBOLDCPP_HOST").unwrap_or_else(|_| "http://localhost:5001".into());
+    let agent = http_agent();
+    let server_running = agent.get(&format!("{url}/api/v1/model")).call().is_ok();
+
+    DetectedBackend {
+        backend: Backend::KoboldCpp,
+        available: binary.is_some() || server_running,
+        binary_path: binary,
+        api_url: Some(url),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -172,6 +225,8 @@ mod tests {
         assert_eq!(Backend::Ollama.label(), "Ollama");
         assert_eq!(Backend::MlxLm.label(), "MLX");
         assert_eq!(Backend::LmStudio.label(), "LM Studio");
+        assert_eq!(Backend::Vllm.label(), "vLLM");
+        assert_eq!(Backend::KoboldCpp.label(), "KoboldCpp");
     }
 
     #[test]
@@ -181,6 +236,10 @@ mod tests {
         assert!(Backend::MlxLm.can_serve_mlx());
         assert!(!Backend::MlxLm.can_serve_gguf());
         assert!(Backend::Ollama.can_serve_gguf());
+        assert!(Backend::Vllm.can_serve_gguf());
+        assert!(Backend::KoboldCpp.can_serve_gguf());
+        assert!(!Backend::Vllm.can_serve_mlx());
+        assert!(!Backend::KoboldCpp.can_serve_mlx());
     }
 
     #[test]
@@ -189,6 +248,8 @@ mod tests {
         assert_eq!(backend_key(&Backend::Ollama), "ollama");
         assert_eq!(backend_key(&Backend::MlxLm), "mlx");
         assert_eq!(backend_key(&Backend::LmStudio), "lm-studio");
+        assert_eq!(backend_key(&Backend::Vllm), "vllm");
+        assert_eq!(backend_key(&Backend::KoboldCpp), "koboldcpp");
     }
 
     #[test]
@@ -211,12 +272,14 @@ mod tests {
     }
 
     #[test]
-    fn detect_backends_returns_four() {
+    fn detect_backends_returns_six() {
         let backends = detect_backends();
-        assert_eq!(backends.len(), 4);
+        assert_eq!(backends.len(), 6);
         assert_eq!(backends[0].backend, Backend::LlamaServer);
         assert_eq!(backends[1].backend, Backend::Ollama);
         assert_eq!(backends[2].backend, Backend::MlxLm);
         assert_eq!(backends[3].backend, Backend::LmStudio);
+        assert_eq!(backends[4].backend, Backend::Vllm);
+        assert_eq!(backends[5].backend, Backend::KoboldCpp);
     }
 }

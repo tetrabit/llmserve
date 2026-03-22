@@ -77,6 +77,26 @@ impl Default for Config {
 
         presets.insert("lm-studio".into(), BackendPreset::default());
 
+        presets.insert(
+            "vllm".into(),
+            BackendPreset {
+                ctx_size: Some(8192),
+                port: Some(8000),
+                gpu_layers: Some(-1),
+                ..Default::default()
+            },
+        );
+
+        presets.insert(
+            "koboldcpp".into(),
+            BackendPreset {
+                ctx_size: Some(8192),
+                gpu_layers: Some(-1),
+                port: Some(5001),
+                ..Default::default()
+            },
+        );
+
         Self {
             extra_model_dirs: Vec::new(),
             preferred_port: 8080,
@@ -158,6 +178,8 @@ mod tests {
         assert!(config.presets.contains_key("ollama"));
         assert!(config.presets.contains_key("mlx"));
         assert!(config.presets.contains_key("lm-studio"));
+        assert!(config.presets.contains_key("vllm"));
+        assert!(config.presets.contains_key("koboldcpp"));
     }
 
     #[test]

@@ -130,6 +130,10 @@ fn set_nonblocking(child: &mut Child) {
             }
         }
     }
+
+    // Windows: would need winapi/windows-sys crate for SetNamedPipeHandleState(PIPE_NOWAIT)
+    #[cfg(windows)]
+    let _ = child;
 }
 
 fn make_handle(
@@ -166,6 +170,8 @@ pub fn launch(
         Backend::LmStudio => {
             Err("LM Studio manages its own server. Load the model in LM Studio directly.".into())
         }
+        Backend::Vllm => launch_vllm(model, config),
+        Backend::KoboldCpp => launch_koboldcpp(model, config),
     }
 }
 
@@ -284,6 +290,85 @@ fn launch_ollama(model: &DiscoveredModel, config: &Config) -> Result<ServerHandl
 
     Ok(make_handle(
         Backend::Ollama,
+        model,
+        preset.port,
+        preset.host,
+        child,
+    ))
+}
+
+fn launch_vllm(model: &DiscoveredModel, config: &Config) -> Result<ServerHandle, String> {
+    let preset = config.preset_for("vllm");
+
+    let mut cmd = Command::new("vllm");
+    cmd.arg("serve")
+        .arg(&model.path)
+        .arg("--host")
+        .arg(&preset.host)
+        .arg("--port")
+        .arg(preset.port.to_string())
+        .arg("--max-model-len")
+        .arg(preset.ctx_size.to_string());
+
+    if let Some(gpu_layers) = preset.gpu_layers {
+        if gpu_layers >= 0 {
+            cmd.arg("--tensor-parallel-size")
+                .arg(gpu_layers.to_string());
+        }
+    }
+
+    for arg in &preset.extra_args {
+        cmd.arg(arg);
+    }
+
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+
+    let child = cmd
+        .spawn()
+        .map_err(|e| format!("Failed to start vllm: {e}"))?;
+
+    Ok(make_handle(
+        Backend::Vllm,
+        model,
+        preset.port,
+        preset.host,
+        child,
+    ))
+}
+
+fn launch_koboldcpp(model: &DiscoveredModel, config: &Config) -> Result<ServerHandle, String> {
+    let preset = config.preset_for("koboldcpp");
+
+    let mut cmd = Command::new("koboldcpp");
+    cmd.arg("--model")
+        .arg(&model.path)
+        .arg("--host")
+        .arg(&preset.host)
+        .arg("--port")
+        .arg(preset.port.to_string())
+        .arg("--contextsize")
+        .arg(preset.ctx_size.to_string());
+
+    if let Some(gpu_layers) = preset.gpu_layers {
+        cmd.arg("--gpulayers").arg(gpu_layers.to_string());
+    }
+
+    if let Some(threads) = preset.threads {
+        cmd.arg("--threads").arg(threads.to_string());
+    }
+
+    for arg in &preset.extra_args {
+        cmd.arg(arg);
+    }
+
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+
+    let child = cmd
+        .spawn()
+        .map_err(|e| format!("Failed to start koboldcpp: {e}"))?;
+
+    Ok(make_handle(
+        Backend::KoboldCpp,
         model,
         preset.port,
         preset.host,
