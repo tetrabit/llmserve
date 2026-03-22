@@ -12,7 +12,9 @@
 
 **Any model. Any backend. One TUI to serve them all.**
 
-A terminal tool for serving local LLM models. llmserve auto-detects your locally installed inference engines (llama-server, Ollama, MLX, LM Studio), discovers model files across multiple locations, and lets you launch servers with live log output — all from a single interactive TUI.
+If you're like me, you've got dozens of GGUF and MLX models scattered across LM Studio, HuggingFace cache, and random directories — and you want to quickly spin one up with whichever inference engine happens to be installed. llmserve is the front door for that. It finds your models, finds your backends, and gets out of the way.
+
+It auto-detects locally installed inference engines (llama-server, KoboldCpp, LocalAI, MLX, and more), discovers model files across multiple locations, and lets you launch servers with live log output — all from a single interactive TUI. No config files to write, no CLI flags to remember.
 
 > **Sister project:** Use [llmfit](https://github.com/AlexsJones/llmfit) to figure out *which* models fit your hardware, then use llmserve to actually *run* them.
 
@@ -102,7 +104,7 @@ The dialog shows the resolved preset for the selected backend (context size, fla
 
 ## Features
 
-- **Auto-detects inference backends** — llama-server, Ollama, MLX (Apple Silicon), LM Studio
+- **Auto-detects inference backends** — llama-server, KoboldCpp, LocalAI, MLX (Apple Silicon), Ollama, vLLM, LM Studio
 - **Source tree** — collapsible file tree showing all model locations with model counts and green dots for serving models
 - **Add directories live** — press `a`, type a path with tab-completion, and the directory is scanned immediately and persisted to config
 - **Filter by source** — click a source in the tree to show only its models
@@ -153,15 +155,18 @@ gpu_layers = -1          # -1 = all layers to GPU
 threads = 8
 extra_args = ["--mlock", "--cont-batching"]
 
-[presets.ollama]
+[presets.koboldcpp]
 ctx_size = 8192
+gpu_layers = -1
+port = 5001
+
+[presets.localai]
+ctx_size = 8192
+port = 8080
 
 [presets.mlx]
 ctx_size = 4096
 port = 8081
-
-[presets.lm-studio]
-# LM Studio manages its own server
 ```
 
 | Field | Type | Description |
@@ -179,12 +184,19 @@ port = 8081
 
 ## Backend detection
 
-| Backend | Detection | Env override |
-|---------|-----------|-------------|
-| llama-server | `which llama-server` | — |
-| Ollama | `GET localhost:11434/api/tags` | `OLLAMA_HOST` |
-| LM Studio | `GET 127.0.0.1:1234/v1/models` | `LMSTUDIO_HOST` |
-| MLX | `python3 -c "import mlx_lm"` (macOS) | — |
+llmserve detects 7 backends at startup. Backends that can serve local model files are marked with a checkmark:
+
+| Backend | Local GGUF | Local MLX | Detection | Env override |
+|---------|:---:|:---:|-----------|-------------|
+| llama-server | Yes | — | `which llama-server` | — |
+| KoboldCpp | Yes | — | binary + API `:5001` | `KOBOLDCPP_HOST` |
+| LocalAI | Yes | — | binary + API `:8080` + Docker | `LOCALAI_HOST` |
+| MLX | — | Yes | `python3 -c "import mlx_lm"` (macOS) | — |
+| Ollama | — | — | `GET :11434/api/tags` | `OLLAMA_HOST` |
+| vLLM | — | — | binary + API `:8000` | `VLLM_HOST` |
+| LM Studio | — | — | `GET :1234/v1/models` | `LMSTUDIO_HOST` |
+
+> Backends that can't serve local files (Ollama, vLLM, LM Studio) are detected but show a clear reason in the serve dialog. They use their own model registries or manage their own servers.
 
 ## Model discovery
 
@@ -202,8 +214,8 @@ port = 8081
 
 ```sh
 make build       # Debug build
-make test        # Unit + integration tests (skips slow serve test)
-make test-all    # All tests including serve rotation
+make test        # Unit + integration tests (CI-safe)
+make test-local  # All tests including local model serve rotation
 make clippy      # Lint
 make fmt         # Format
 make install     # Install to ~/.cargo/bin
@@ -216,7 +228,7 @@ src/
   main.rs       — Terminal init/restore, main loop
   lib.rs        — Module exports for integration tests
   app.rs        — App state, input modes, navigation, filtering, serve lifecycle
-  backends.rs   — Backend detection (llama-server, Ollama, MLX, LM Studio)
+  backends.rs   — Backend detection (7 backends: llama-server, KoboldCpp, LocalAI, MLX, Ollama, vLLM, LM Studio)
   config.rs     — Config + per-backend presets, load/save TOML
   events.rs     — Crossterm event handling, vim-style keybindings
   models.rs     — Model discovery from disk + APIs

@@ -9,6 +9,7 @@ pub enum Backend {
     LmStudio,
     Vllm,
     KoboldCpp,
+    LocalAi,
 }
 
 impl Backend {
@@ -20,22 +21,36 @@ impl Backend {
             Backend::LmStudio => "LM Studio",
             Backend::Vllm => "vLLM",
             Backend::KoboldCpp => "KoboldCpp",
+            Backend::LocalAi => "LocalAI",
         }
     }
 
-    pub fn can_serve_gguf(&self) -> bool {
-        matches!(
-            self,
-            Backend::LlamaServer
-                | Backend::Ollama
-                | Backend::LmStudio
-                | Backend::Vllm
-                | Backend::KoboldCpp
-        )
+    /// Whether this backend can serve a local model file (GGUF path on disk).
+    pub fn can_serve_local_gguf(&self) -> bool {
+        matches!(self, Backend::LlamaServer | Backend::KoboldCpp | Backend::LocalAi)
     }
 
-    pub fn can_serve_mlx(&self) -> bool {
+    /// Whether this backend can serve a local MLX model directory.
+    pub fn can_serve_local_mlx(&self) -> bool {
         matches!(self, Backend::MlxLm)
+    }
+
+    /// Whether this backend can serve a model from a local file/directory.
+    pub fn can_serve_local(&self, format: &crate::models::ModelFormat) -> bool {
+        match format {
+            crate::models::ModelFormat::Gguf => self.can_serve_local_gguf(),
+            crate::models::ModelFormat::Mlx => self.can_serve_local_mlx(),
+        }
+    }
+
+    /// Why this backend can't serve local files, if applicable.
+    pub fn local_serve_reason(&self) -> Option<&'static str> {
+        match self {
+            Backend::LlamaServer | Backend::KoboldCpp | Backend::MlxLm | Backend::LocalAi => None,
+            Backend::Ollama => Some("Ollama uses its own model registry, not local files"),
+            Backend::LmStudio => Some("LM Studio manages its own server"),
+            Backend::Vllm => Some("vLLM expects HuggingFace model IDs, not local GGUF files"),
+        }
     }
 }
 
@@ -68,6 +83,7 @@ pub fn detect_backends() -> Vec<DetectedBackend> {
         detect_lmstudio(),
         detect_vllm(),
         detect_koboldcpp(),
+        detect_localai(),
     ]
 }
 
@@ -172,6 +188,7 @@ pub fn backend_key(backend: &Backend) -> &'static str {
         Backend::LmStudio => "lm-studio",
         Backend::Vllm => "vllm",
         Backend::KoboldCpp => "koboldcpp",
+        Backend::LocalAi => "localai",
     }
 }
 
@@ -221,6 +238,33 @@ fn detect_koboldcpp() -> DetectedBackend {
     }
 }
 
+fn detect_localai() -> DetectedBackend {
+    // LocalAI: check for binary or running server
+    // Default port 8080, but commonly run on other ports to avoid conflicts
+    let url = std::env::var("LOCALAI_HOST").unwrap_or_else(|_| "http://localhost:8080".into());
+    let agent = http_agent();
+
+    // LocalAI exposes OpenAI-compatible /v1/models
+    let server_running = agent.get(&format!("{url}/v1/models")).call().is_ok();
+
+    // Also check for the local-ai binary
+    let binary = find_binary("local-ai");
+
+    // Check if it's running via Docker (look for localai container)
+    let docker_running = Command::new("docker")
+        .args(["ps", "--filter", "ancestor=localai/localai", "--format", "{{.ID}}"])
+        .output()
+        .ok()
+        .is_some_and(|o| o.status.success() && !o.stdout.is_empty());
+
+    DetectedBackend {
+        backend: Backend::LocalAi,
+        available: server_running || binary.is_some() || docker_running,
+        binary_path: binary,
+        api_url: Some(url),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -233,19 +277,41 @@ mod tests {
         assert_eq!(Backend::LmStudio.label(), "LM Studio");
         assert_eq!(Backend::Vllm.label(), "vLLM");
         assert_eq!(Backend::KoboldCpp.label(), "KoboldCpp");
+        assert_eq!(Backend::LocalAi.label(), "LocalAI");
     }
 
     #[test]
-    fn backend_format_support() {
-        assert!(Backend::LlamaServer.can_serve_gguf());
-        assert!(!Backend::LlamaServer.can_serve_mlx());
-        assert!(Backend::MlxLm.can_serve_mlx());
-        assert!(!Backend::MlxLm.can_serve_gguf());
-        assert!(Backend::Ollama.can_serve_gguf());
-        assert!(Backend::Vllm.can_serve_gguf());
-        assert!(Backend::KoboldCpp.can_serve_gguf());
-        assert!(!Backend::Vllm.can_serve_mlx());
-        assert!(!Backend::KoboldCpp.can_serve_mlx());
+    fn backend_local_serve_support() {
+        use crate::models::ModelFormat;
+        // Can serve local GGUF files
+        assert!(Backend::LlamaServer.can_serve_local_gguf());
+        assert!(Backend::KoboldCpp.can_serve_local_gguf());
+        assert!(Backend::LocalAi.can_serve_local_gguf());
+        // Cannot serve local GGUF files (use their own registries)
+        assert!(!Backend::Ollama.can_serve_local_gguf());
+        assert!(!Backend::Vllm.can_serve_local_gguf());
+        assert!(!Backend::LmStudio.can_serve_local_gguf());
+        // MLX
+        assert!(Backend::MlxLm.can_serve_local_mlx());
+        assert!(!Backend::LlamaServer.can_serve_local_mlx());
+        assert!(!Backend::LocalAi.can_serve_local_mlx());
+        // Combined check
+        assert!(Backend::LlamaServer.can_serve_local(&ModelFormat::Gguf));
+        assert!(!Backend::LlamaServer.can_serve_local(&ModelFormat::Mlx));
+        assert!(Backend::MlxLm.can_serve_local(&ModelFormat::Mlx));
+        assert!(!Backend::Ollama.can_serve_local(&ModelFormat::Gguf));
+        assert!(Backend::LocalAi.can_serve_local(&ModelFormat::Gguf));
+    }
+
+    #[test]
+    fn incompatible_backends_have_reasons() {
+        assert!(Backend::Ollama.local_serve_reason().is_some());
+        assert!(Backend::LmStudio.local_serve_reason().is_some());
+        assert!(Backend::Vllm.local_serve_reason().is_some());
+        assert!(Backend::LlamaServer.local_serve_reason().is_none());
+        assert!(Backend::KoboldCpp.local_serve_reason().is_none());
+        assert!(Backend::MlxLm.local_serve_reason().is_none());
+        assert!(Backend::LocalAi.local_serve_reason().is_none());
     }
 
     #[test]
@@ -256,6 +322,7 @@ mod tests {
         assert_eq!(backend_key(&Backend::LmStudio), "lm-studio");
         assert_eq!(backend_key(&Backend::Vllm), "vllm");
         assert_eq!(backend_key(&Backend::KoboldCpp), "koboldcpp");
+        assert_eq!(backend_key(&Backend::LocalAi), "localai");
     }
 
     #[test]
@@ -278,14 +345,15 @@ mod tests {
     }
 
     #[test]
-    fn detect_backends_returns_six() {
+    fn detect_backends_returns_seven() {
         let backends = detect_backends();
-        assert_eq!(backends.len(), 6);
+        assert_eq!(backends.len(), 7);
         assert_eq!(backends[0].backend, Backend::LlamaServer);
         assert_eq!(backends[1].backend, Backend::Ollama);
         assert_eq!(backends[2].backend, Backend::MlxLm);
         assert_eq!(backends[3].backend, Backend::LmStudio);
         assert_eq!(backends[4].backend, Backend::Vllm);
         assert_eq!(backends[5].backend, Backend::KoboldCpp);
+        assert_eq!(backends[6].backend, Backend::LocalAi);
     }
 }

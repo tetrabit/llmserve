@@ -163,15 +163,29 @@ pub fn launch(
     backend: &Backend,
     config: &Config,
 ) -> Result<ServerHandle, String> {
+    // Check compatibility: can this backend serve this local model file?
+    if !backend.can_serve_local(&model.format) {
+        let reason = backend
+            .local_serve_reason()
+            .unwrap_or("incompatible format");
+        return Err(format!(
+            "{} cannot serve local {} files: {}",
+            backend.label(),
+            model.format,
+            reason
+        ));
+    }
+
     match backend {
         Backend::LlamaServer => launch_llama_server(model, config),
         Backend::MlxLm => launch_mlx(model, config),
-        Backend::Ollama => launch_ollama(model, config),
-        Backend::LmStudio => {
-            Err("LM Studio manages its own server. Load the model in LM Studio directly.".into())
-        }
-        Backend::Vllm => launch_vllm(model, config),
         Backend::KoboldCpp => launch_koboldcpp(model, config),
+        Backend::LocalAi => launch_localai(model, config),
+        // These are blocked by the can_serve_local check above,
+        // but match exhaustively for safety.
+        Backend::Ollama | Backend::LmStudio | Backend::Vllm => {
+            Err(format!("{} cannot serve local model files", backend.label()))
+        }
     }
 }
 
@@ -274,68 +288,6 @@ fn launch_mlx(model: &DiscoveredModel, config: &Config) -> Result<ServerHandle, 
     ))
 }
 
-fn launch_ollama(model: &DiscoveredModel, config: &Config) -> Result<ServerHandle, String> {
-    let preset = config.preset_for("ollama");
-
-    let mut cmd = Command::new("ollama");
-    cmd.arg("run").arg(&model.name);
-
-    cmd.stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-
-    let child = cmd
-        .spawn()
-        .map_err(|e| format!("Failed to start ollama: {e}"))?;
-
-    Ok(make_handle(
-        Backend::Ollama,
-        model,
-        preset.port,
-        preset.host,
-        child,
-    ))
-}
-
-fn launch_vllm(model: &DiscoveredModel, config: &Config) -> Result<ServerHandle, String> {
-    let preset = config.preset_for("vllm");
-
-    let mut cmd = Command::new("vllm");
-    cmd.arg("serve")
-        .arg(&model.path)
-        .arg("--host")
-        .arg(&preset.host)
-        .arg("--port")
-        .arg(preset.port.to_string())
-        .arg("--max-model-len")
-        .arg(preset.ctx_size.to_string());
-
-    if let Some(gpu_layers) = preset.gpu_layers {
-        if gpu_layers >= 0 {
-            cmd.arg("--tensor-parallel-size")
-                .arg(gpu_layers.to_string());
-        }
-    }
-
-    for arg in &preset.extra_args {
-        cmd.arg(arg);
-    }
-
-    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-
-    let child = cmd
-        .spawn()
-        .map_err(|e| format!("Failed to start vllm: {e}"))?;
-
-    Ok(make_handle(
-        Backend::Vllm,
-        model,
-        preset.port,
-        preset.host,
-        child,
-    ))
-}
-
 fn launch_koboldcpp(model: &DiscoveredModel, config: &Config) -> Result<ServerHandle, String> {
     let preset = config.preset_for("koboldcpp");
 
@@ -369,6 +321,48 @@ fn launch_koboldcpp(model: &DiscoveredModel, config: &Config) -> Result<ServerHa
 
     Ok(make_handle(
         Backend::KoboldCpp,
+        model,
+        preset.port,
+        preset.host,
+        child,
+    ))
+}
+
+fn launch_localai(model: &DiscoveredModel, config: &Config) -> Result<ServerHandle, String> {
+    let preset = config.preset_for("localai");
+
+    // LocalAI serves models from a directory. We point --models-path at the
+    // parent directory of the GGUF file so it discovers it automatically.
+    let models_dir = model
+        .path
+        .parent()
+        .ok_or_else(|| "Cannot determine model directory".to_string())?;
+
+    let mut cmd = Command::new("local-ai");
+    cmd.arg("run")
+        .arg("--models-path")
+        .arg(models_dir)
+        .arg("--address")
+        .arg(format!("{}:{}", preset.host, preset.port))
+        .arg("--context-size")
+        .arg(preset.ctx_size.to_string());
+
+    if let Some(threads) = preset.threads {
+        cmd.arg("--threads").arg(threads.to_string());
+    }
+
+    for arg in &preset.extra_args {
+        cmd.arg(arg);
+    }
+
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+
+    let child = cmd
+        .spawn()
+        .map_err(|e| format!("Failed to start local-ai: {e}"))?;
+
+    Ok(make_handle(
+        Backend::LocalAi,
         model,
         preset.port,
         preset.host,
@@ -479,5 +473,41 @@ mod tests {
         assert!(result.is_err());
         let err = result.err().unwrap();
         assert!(err.contains("LM Studio"));
+    }
+
+    #[test]
+    fn ollama_rejects_local_gguf() {
+        let config = Config::default();
+        let model = DiscoveredModel {
+            name: "test".into(),
+            path: "test.gguf".into(),
+            mmproj: None,
+            format: crate::models::ModelFormat::Gguf,
+            size_bytes: 0,
+            quant: None,
+            param_hint: None,
+            source: crate::models::ModelSource::ExtraDir,
+        };
+        let result = launch(&model, &Backend::Ollama, &config);
+        assert!(result.is_err());
+        assert!(result.err().unwrap().contains("registry"));
+    }
+
+    #[test]
+    fn vllm_rejects_local_gguf() {
+        let config = Config::default();
+        let model = DiscoveredModel {
+            name: "test".into(),
+            path: "test.gguf".into(),
+            mmproj: None,
+            format: crate::models::ModelFormat::Gguf,
+            size_bytes: 0,
+            quant: None,
+            param_hint: None,
+            source: crate::models::ModelSource::ExtraDir,
+        };
+        let result = launch(&model, &Backend::Vllm, &config);
+        assert!(result.is_err());
+        assert!(result.err().unwrap().contains("HuggingFace"));
     }
 }

@@ -580,7 +580,16 @@ fn draw_confirm_popup(frame: &mut Frame, app: &App, tc: &ThemeColors) {
     let preset = app.config.preset_for(backend_key_str);
     let already_serving = app.confirm_already_serving();
 
-    let backend_status = if !backend_available {
+    let compatible = app.confirm_compatible();
+    let incompatible_reason = app.confirm_incompatible_reason();
+
+    let backend_status = if !compatible {
+        let reason = incompatible_reason.unwrap_or("incompatible");
+        Span::styled(
+            format!(" [{reason}]"),
+            Style::default().fg(tc.error),
+        )
+    } else if !backend_available {
         Span::styled(" [not found]", Style::default().fg(tc.error))
     } else if already_serving {
         Span::styled(" [already serving]", Style::default().fg(tc.warning))

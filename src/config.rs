@@ -97,6 +97,15 @@ impl Default for Config {
             },
         );
 
+        presets.insert(
+            "localai".into(),
+            BackendPreset {
+                ctx_size: Some(8192),
+                port: Some(8080),
+                ..Default::default()
+            },
+        );
+
         Self {
             extra_model_dirs: Vec::new(),
             preferred_port: 8080,
@@ -180,6 +189,7 @@ mod tests {
         assert!(config.presets.contains_key("lm-studio"));
         assert!(config.presets.contains_key("vllm"));
         assert!(config.presets.contains_key("koboldcpp"));
+        assert!(config.presets.contains_key("localai"));
     }
 
     #[test]

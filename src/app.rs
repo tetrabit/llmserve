@@ -656,12 +656,22 @@ impl App {
     // -- Serve --
 
     pub fn open_confirm_serve(&mut self) {
-        if self.selected_model().is_some() {
-            self.confirm_backend_idx = self.selected_backend;
-            self.confirm_port_input = self.next_available_port().to_string();
-            self.confirm_editing_port = false;
-            self.input_mode = InputMode::ConfirmServe;
-        }
+        let Some(model) = self.selected_model() else {
+            return;
+        };
+        let format = model.format.clone();
+
+        // Pre-select the first compatible + available backend
+        let best = self
+            .backends
+            .iter()
+            .position(|b| b.available && b.backend.can_serve_local(&format))
+            .unwrap_or(self.selected_backend);
+
+        self.confirm_backend_idx = best;
+        self.confirm_port_input = self.next_available_port().to_string();
+        self.confirm_editing_port = false;
+        self.input_mode = InputMode::ConfirmServe;
     }
 
     pub fn confirm_backend(&self) -> Option<&DetectedBackend> {
@@ -672,6 +682,23 @@ impl App {
         self.confirm_port_input
             .parse()
             .unwrap_or(self.next_available_port())
+    }
+
+    /// Whether the selected backend is compatible with the selected model's format.
+    pub fn confirm_compatible(&self) -> bool {
+        let Some(model) = self.selected_model() else {
+            return false;
+        };
+        let Some(backend) = self.confirm_backend() else {
+            return false;
+        };
+        backend.backend.can_serve_local(&model.format)
+    }
+
+    /// Reason the selected backend can't serve local files, if any.
+    pub fn confirm_incompatible_reason(&self) -> Option<&'static str> {
+        self.confirm_backend()
+            .and_then(|b| b.backend.local_serve_reason())
     }
 
     pub fn confirm_already_serving(&self) -> bool {
@@ -729,6 +756,15 @@ impl App {
 
         if !backend.available {
             self.status_message = Some(format!("{} is not available", backend.backend.label()));
+            return;
+        }
+
+        if !backend.backend.can_serve_local(&model.format) {
+            let reason = backend
+                .backend
+                .local_serve_reason()
+                .unwrap_or("incompatible format");
+            self.status_message = Some(format!("{}: {}", backend.backend.label(), reason));
             return;
         }
 
