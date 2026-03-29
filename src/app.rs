@@ -1,7 +1,8 @@
-use crate::backends::{detect_backends, fetch_ollama_models, Backend, DetectedBackend};
+use crate::backends::{Backend, DetectedBackend, detect_backends, fetch_ollama_models};
+use crate::hardware::{self, HardwareInfo};
 use crate::config::Config;
 use crate::models::{
-    add_ollama_models, discover_models, DiscoveredModel, ModelFormat, ModelSource,
+    DiscoveredModel, ModelFormat, ModelSource, add_ollama_models, discover_models,
 };
 use crate::server::{self, ServerHandle};
 use crate::theme::Theme;
@@ -119,6 +120,7 @@ pub struct App {
     pub confirm_editing_port: bool,
     pub confirm_use_model_max_ctx: bool,
     pub confirm_common_ctx_idx: Option<usize>,
+    pub confirm_use_hw_guess: bool,
 
     // Source tree
     pub tree_nodes: Vec<TreeNode>,
@@ -147,6 +149,9 @@ pub struct App {
 
     pub config: Config,
     pub theme: Theme,
+
+    /// Cached hardware info (detected once at startup).
+    pub hardware_info: Option<HardwareInfo>,
 }
 
 impl App {
@@ -203,6 +208,7 @@ impl App {
             confirm_editing_port: false,
             confirm_use_model_max_ctx: false,
             confirm_common_ctx_idx: None,
+            confirm_use_hw_guess: false,
             tree_nodes,
             tree_cursor: 0,
             tree_source_filter: None,
@@ -217,6 +223,7 @@ impl App {
             status_message: None,
             config,
             theme,
+            hardware_info: hardware::detect_hardware(),
         }
     }
 
@@ -668,7 +675,7 @@ impl App {
         let best = self
             .backends
             .iter()
-            .position(|b| b.available && b.backend.can_serve_model(model))
+            .position(|b| b.can_launch() && b.backend.can_serve_model(model))
             .unwrap_or(self.selected_backend);
 
         self.confirm_backend_idx = best;
@@ -676,6 +683,7 @@ impl App {
         self.confirm_editing_port = false;
         self.confirm_use_model_max_ctx = false;
         self.confirm_common_ctx_idx = None;
+        self.confirm_use_hw_guess = false;
         self.input_mode = InputMode::ConfirmServe;
     }
 
@@ -725,7 +733,9 @@ impl App {
     }
 
     pub fn confirm_ctx_source_label(&self) -> &'static str {
-        if self.confirm_use_model_max_ctx && self.confirm_can_use_model_max_ctx() {
+        if self.confirm_use_hw_guess && self.confirm_can_use_hw_guess() {
+            "hw guess"
+        } else if self.confirm_use_model_max_ctx && self.confirm_can_use_model_max_ctx() {
             "model max"
         } else if self
             .confirm_common_ctx_idx
@@ -743,8 +753,9 @@ impl App {
             .map(|backend| crate::backends::backend_key(&backend.backend))
             .unwrap_or("unknown");
         let preset_ctx = self.config.preset_for(backend_key).ctx_size;
-
-        if self.confirm_use_model_max_ctx && self.confirm_can_use_model_max_ctx() {
+        if self.confirm_use_hw_guess && self.confirm_can_use_hw_guess() {
+            self.confirm_hw_guess_ctx().unwrap_or(preset_ctx)
+        } else if self.confirm_use_model_max_ctx && self.confirm_can_use_model_max_ctx() {
             self.confirm_model_max_ctx().unwrap_or(preset_ctx)
         } else if let Some(idx) = self.confirm_common_ctx_idx {
             self.confirm_common_ctx_sizes()
@@ -761,6 +772,7 @@ impl App {
             self.confirm_use_model_max_ctx = !self.confirm_use_model_max_ctx;
             if self.confirm_use_model_max_ctx {
                 self.confirm_common_ctx_idx = None;
+                self.confirm_use_hw_guess = false;
             }
         }
     }
@@ -780,6 +792,31 @@ impl App {
 
         self.confirm_use_model_max_ctx = false;
         self.confirm_common_ctx_idx = Some(next_idx);
+        self.confirm_use_hw_guess = false;
+    }
+
+    pub fn confirm_hw_guess_ctx(&self) -> Option<u32> {
+        let hw = self.hardware_info.as_ref()?;
+        let model = self.selected_model()?;
+        let kv_cost = model.kv_bytes_per_token?;
+        hardware::estimate_max_context(hw, model.size_bytes, kv_cost)
+    }
+
+    pub fn confirm_can_use_hw_guess(&self) -> bool {
+        self.confirm_hw_guess_ctx().is_some()
+            && self
+                .confirm_backend()
+                .is_some_and(|backend| backend.backend.supports_ctx_size_override())
+    }
+
+    pub fn confirm_toggle_hw_guess(&mut self) {
+        if self.confirm_can_use_hw_guess() {
+            self.confirm_use_hw_guess = !self.confirm_use_hw_guess;
+            if self.confirm_use_hw_guess {
+                self.confirm_use_model_max_ctx = false;
+                self.confirm_common_ctx_idx = None;
+            }
+        }
     }
 
     /// Whether the selected backend is compatible with the selected model's format.
@@ -817,6 +854,9 @@ impl App {
             if !self.confirm_can_use_model_max_ctx() {
                 self.confirm_use_model_max_ctx = false;
             }
+            if !self.confirm_can_use_hw_guess() {
+                self.confirm_use_hw_guess = false;
+            }
             if !self.confirm_can_cycle_common_ctx() {
                 self.confirm_common_ctx_idx = None;
             } else if self
@@ -837,6 +877,9 @@ impl App {
             };
             if !self.confirm_can_use_model_max_ctx() {
                 self.confirm_use_model_max_ctx = false;
+            }
+            if !self.confirm_can_use_hw_guess() {
+                self.confirm_use_hw_guess = false;
             }
             if !self.confirm_can_cycle_common_ctx() {
                 self.confirm_common_ctx_idx = None;
@@ -876,6 +919,14 @@ impl App {
 
         if !backend.available {
             self.status_message = Some(format!("{} is not available", backend.backend.label()));
+            return;
+        }
+
+        if !backend.can_launch() {
+            self.status_message = Some(format!(
+                "{} is detectable but not launchable from llmserve on this system",
+                backend.backend.label()
+            ));
             return;
         }
 
