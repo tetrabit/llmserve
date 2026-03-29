@@ -508,15 +508,9 @@ fn parse_gguf_metadata<R: Read + Seek>(reader: &mut R) -> io::Result<GgufMetadat
     })
 }
 
-// Keep the old name available for existing test
+#[cfg(test)]
 fn parse_gguf_max_context<R: Read + Seek>(reader: &mut R) -> io::Result<Option<u32>> {
     parse_gguf_metadata(reader).map(|m| m.max_context)
-}
-
-fn read_hf_config_max_context(path: &Path) -> Option<u32> {
-    let config = fs::read_to_string(path).ok()?;
-    let value: serde_json::Value = serde_json::from_str(&config).ok()?;
-    extract_hf_config_max_context(&value)
 }
 
 fn extract_hf_config_max_context(value: &serde_json::Value) -> Option<u32> {
