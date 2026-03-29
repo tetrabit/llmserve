@@ -4,6 +4,7 @@ pub mod config;
 pub mod events;
 pub mod hardware;
 pub mod models;
+pub mod opencode;
 pub mod server;
 pub mod theme;
 pub mod ui;
