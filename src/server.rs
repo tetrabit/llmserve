@@ -436,6 +436,7 @@ mod tests {
             quant: None,
             param_hint: Some("27B".into()),
             max_context_size: None,
+            kv_bytes_per_token: None,
             source: crate::models::ModelSource::ExtraDir,
         };
         assert!(is_large_model(&model));
@@ -452,6 +453,7 @@ mod tests {
             quant: None,
             param_hint: Some("9B".into()),
             max_context_size: None,
+            kv_bytes_per_token: None,
             source: crate::models::ModelSource::ExtraDir,
         };
         assert!(!is_large_model(&model));
@@ -468,6 +470,7 @@ mod tests {
             quant: None,
             param_hint: None,
             max_context_size: None,
+            kv_bytes_per_token: None,
             source: crate::models::ModelSource::ExtraDir,
         };
         assert!(is_large_model(&model));
@@ -485,6 +488,7 @@ mod tests {
             quant: None,
             param_hint: None,
             max_context_size: None,
+            kv_bytes_per_token: None,
             source: crate::models::ModelSource::ExtraDir,
         };
         let result = launch(&model, &Backend::LmStudio, &config);
@@ -505,6 +509,7 @@ mod tests {
             quant: None,
             param_hint: None,
             max_context_size: None,
+            kv_bytes_per_token: None,
             source: crate::models::ModelSource::ExtraDir,
         };
         let result = launch(&model, &Backend::Ollama, &config);
@@ -524,6 +529,7 @@ mod tests {
             quant: None,
             param_hint: None,
             max_context_size: None,
+            kv_bytes_per_token: None,
             source: crate::models::ModelSource::ExtraDir,
         };
         let result = launch(&model, &Backend::Vllm, &config);
@@ -543,6 +549,7 @@ mod tests {
             quant: None,
             param_hint: None,
             max_context_size: None,
+            kv_bytes_per_token: None,
             source: crate::models::ModelSource::Ollama,
         };
         let result = launch(&model, &Backend::LlamaServer, &config);

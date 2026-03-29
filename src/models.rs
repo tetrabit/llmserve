@@ -52,6 +52,7 @@ pub struct DiscoveredModel {
     pub quant: Option<String>,
     pub param_hint: Option<String>,
     pub max_context_size: Option<u32>,
+    pub kv_bytes_per_token: Option<f64>,
     pub source: ModelSource,
 }
 
@@ -65,6 +66,75 @@ impl DiscoveredModel {
             format!("{:.0}M", mb)
         }
     }
+}
+
+/// Model metadata extracted from GGUF or HF config for KV cache estimation.
+#[derive(Debug, Clone)]
+pub struct GgufMetadata {
+    pub max_context: Option<u32>,
+    pub block_count: Option<u32>,
+    pub head_count_kv: Option<u32>,
+    pub head_count: Option<u32>,
+    pub embedding_length: Option<u32>,
+}
+
+impl GgufMetadata {
+    /// Calculate KV cache bytes per token (FP16 by default).
+    ///
+    /// Formula: `2 * layers * kv_heads * head_dim * sizeof(fp16)`
+    /// where `head_dim = embedding_length / head_count`.
+    pub fn kv_bytes_per_token(&self) -> Option<f64> {
+        let layers = self.block_count? as f64;
+        let kv_heads = self.head_count_kv? as f64;
+        let head_count = self.head_count? as f64;
+        let embedding = self.embedding_length? as f64;
+        if head_count == 0.0 {
+            return None;
+        }
+        let head_dim = embedding / head_count;
+        // 2 tensors (K+V) * layers * kv_heads * head_dim * 2 bytes (FP16)
+        Some(2.0 * layers * kv_heads * head_dim * 2.0)
+    }
+}
+
+/// Compute KV bytes-per-token from HF config.json fields.
+pub fn kv_bytes_per_token_from_hf_config(value: &serde_json::Value) -> Option<f64> {
+    let scopes = [
+        value.get("text_config"),
+        value.get("llm_config"),
+        value.get("language_config"),
+        Some(value),
+    ];
+
+    let mut layers: Option<u32> = None;
+    let mut kv_heads: Option<u32> = None;
+    let mut attn_heads: Option<u32> = None;
+    let mut hidden_size: Option<u32> = None;
+
+    for scope in scopes.into_iter().flatten() {
+        if layers.is_none() {
+            layers = find_json_u32(scope, "num_hidden_layers");
+        }
+        if kv_heads.is_none() {
+            kv_heads = find_json_u32(scope, "num_key_value_heads");
+        }
+        if attn_heads.is_none() {
+            attn_heads = find_json_u32(scope, "num_attention_heads");
+        }
+        if hidden_size.is_none() {
+            hidden_size = find_json_u32(scope, "hidden_size");
+        }
+    }
+
+    let layers = layers? as f64;
+    let kv_heads = kv_heads.or(attn_heads)? as f64;
+    let attn_heads = attn_heads? as f64;
+    let hidden = hidden_size? as f64;
+    if attn_heads == 0.0 {
+        return None;
+    }
+    let head_dim = hidden / attn_heads;
+    Some(2.0 * layers * kv_heads * head_dim * 2.0)
 }
 
 pub fn discover_models(extra_dirs: &[PathBuf]) -> Vec<DiscoveredModel> {
@@ -172,7 +242,9 @@ fn scan_gguf_dir(
             let mmproj = find_mmproj(parent);
             let size_bytes = fs::metadata(path).map(|m| m.len()).unwrap_or(0);
             let model_name = gguf_display_name(path, dir);
-            let max_context_size = read_gguf_max_context(path);
+            let metadata = read_gguf_metadata(path);
+            let max_context_size = metadata.as_ref().and_then(|m| m.max_context);
+            let kv_bytes_per_token = metadata.as_ref().and_then(|m| m.kv_bytes_per_token());
 
             models.push(DiscoveredModel {
                 name: model_name.clone(),
@@ -183,6 +255,7 @@ fn scan_gguf_dir(
                 quant: parse_quant(&fname),
                 param_hint: parse_params(&model_name),
                 max_context_size,
+                kv_bytes_per_token,
                 source: source.clone(),
             });
         }
@@ -288,7 +361,17 @@ fn scan_mlx_models(
         } else {
             None
         };
-        let max_context_size = read_hf_config_max_context(&snap_path.join("config.json"));
+
+        let config_path = snap_path.join("config.json");
+        let hf_config = fs::read_to_string(&config_path)
+            .ok()
+            .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
+        let max_context_size = hf_config
+            .as_ref()
+            .and_then(|v| extract_hf_config_max_context(v));
+        let kv_bytes_per_token = hf_config
+            .as_ref()
+            .and_then(|v| kv_bytes_per_token_from_hf_config(v));
 
         models.push(DiscoveredModel {
             name: friendly.clone(),
@@ -299,6 +382,7 @@ fn scan_mlx_models(
             quant,
             param_hint: parse_params(&friendly),
             max_context_size,
+            kv_bytes_per_token,
             source: ModelSource::HfCache,
         });
     }
@@ -315,22 +399,26 @@ pub fn add_ollama_models(models: &mut Vec<DiscoveredModel>, ollama_models: Vec<(
             quant: parse_quant(&name),
             param_hint: parse_params(&name),
             max_context_size: None,
+            kv_bytes_per_token: None,
             source: ModelSource::Ollama,
         });
     }
     models.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
 }
 
-fn read_gguf_max_context(path: &Path) -> Option<u32> {
+fn read_gguf_metadata(path: &Path) -> Option<GgufMetadata> {
     let mut file = File::open(path).ok()?;
-    parse_gguf_max_context(&mut file).ok().flatten()
+    parse_gguf_metadata(&mut file).ok()
 }
 
-fn parse_gguf_max_context<R: Read + Seek>(reader: &mut R) -> io::Result<Option<u32>> {
+fn parse_gguf_metadata<R: Read + Seek>(reader: &mut R) -> io::Result<GgufMetadata> {
     let mut magic = [0_u8; 4];
     reader.read_exact(&mut magic)?;
     if &magic != b"GGUF" {
-        return Ok(None);
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "not a GGUF file",
+        ));
     }
 
     let version = read_u32_le(reader)?;
@@ -343,12 +431,21 @@ fn parse_gguf_max_context<R: Read + Seek>(reader: &mut R) -> io::Result<Option<u
             let _tensor_count = read_u64_le(reader)?;
             read_u64_le(reader)?
         }
-        _ => return Ok(None),
+        _ => {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "unsupported GGUF version",
+            ))
+        }
     };
 
     let mut architecture = None;
-    let mut fallback_context = None;
     let mut context_by_arch = std::collections::HashMap::new();
+    let mut fallback_context = None;
+    let mut block_count_by_arch = std::collections::HashMap::<String, u32>::new();
+    let mut head_count_kv_by_arch = std::collections::HashMap::<String, u32>::new();
+    let mut head_count_by_arch = std::collections::HashMap::<String, u32>::new();
+    let mut embedding_by_arch = std::collections::HashMap::<String, u32>::new();
 
     for _ in 0..kv_count {
         let key = read_gguf_string(reader)?;
@@ -367,16 +464,53 @@ fn parse_gguf_max_context<R: Read + Seek>(reader: &mut R) -> io::Result<Option<u
             continue;
         }
 
+        if let Some(prefix) = key.strip_suffix(".block_count") {
+            if let Some(value) = read_gguf_u32_value(reader, value_type)? {
+                block_count_by_arch.insert(prefix.to_string(), value);
+            }
+            continue;
+        }
+
+        if let Some(prefix) = key.strip_suffix(".attention.head_count_kv") {
+            if let Some(value) = read_gguf_u32_value(reader, value_type)? {
+                head_count_kv_by_arch.insert(prefix.to_string(), value);
+            }
+            continue;
+        }
+
+        if let Some(prefix) = key.strip_suffix(".attention.head_count") {
+            if let Some(value) = read_gguf_u32_value(reader, value_type)? {
+                head_count_by_arch.insert(prefix.to_string(), value);
+            }
+            continue;
+        }
+
+        if let Some(prefix) = key.strip_suffix(".embedding_length") {
+            if let Some(value) = read_gguf_u32_value(reader, value_type)? {
+                embedding_by_arch.insert(prefix.to_string(), value);
+            }
+            continue;
+        }
+
         skip_gguf_value(reader, value_type)?;
     }
 
-    if let Some(arch) = architecture {
-        if let Some(value) = context_by_arch.get(&arch) {
-            return Ok(Some(*value));
-        }
-    }
+    let arch = architecture.unwrap_or_default();
 
-    Ok(fallback_context)
+    let max_context = context_by_arch.get(&arch).copied().or(fallback_context);
+
+    Ok(GgufMetadata {
+        max_context,
+        block_count: block_count_by_arch.get(&arch).copied(),
+        head_count_kv: head_count_kv_by_arch.get(&arch).copied(),
+        head_count: head_count_by_arch.get(&arch).copied(),
+        embedding_length: embedding_by_arch.get(&arch).copied(),
+    })
+}
+
+// Keep the old name available for existing test
+fn parse_gguf_max_context<R: Read + Seek>(reader: &mut R) -> io::Result<Option<u32>> {
+    parse_gguf_metadata(reader).map(|m| m.max_context)
 }
 
 fn read_hf_config_max_context(path: &Path) -> Option<u32> {
@@ -691,6 +825,54 @@ mod tests {
         buf
     }
 
+    /// Build a GGUF byte buffer with architecture metadata for KV cache testing.
+    fn sample_gguf_with_kv_metadata(
+        arch: &str,
+        ctx: u32,
+        block_count: u32,
+        head_count_kv: u32,
+        head_count: u32,
+        embedding_length: u32,
+    ) -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(b"GGUF");
+        push_u32(&mut buf, 3); // version
+        push_u64(&mut buf, 0); // tensor count
+        push_u64(&mut buf, 6); // kv count
+
+        // general.architecture
+        push_string(&mut buf, "general.architecture");
+        push_u32(&mut buf, 8); // type: string
+        push_string(&mut buf, arch);
+
+        // context_length
+        push_string(&mut buf, &format!("{arch}.context_length"));
+        push_u32(&mut buf, 4); // type: u32
+        push_u32(&mut buf, ctx);
+
+        // block_count
+        push_string(&mut buf, &format!("{arch}.block_count"));
+        push_u32(&mut buf, 4);
+        push_u32(&mut buf, block_count);
+
+        // attention.head_count_kv
+        push_string(&mut buf, &format!("{arch}.attention.head_count_kv"));
+        push_u32(&mut buf, 4);
+        push_u32(&mut buf, head_count_kv);
+
+        // attention.head_count
+        push_string(&mut buf, &format!("{arch}.attention.head_count"));
+        push_u32(&mut buf, 4);
+        push_u32(&mut buf, head_count);
+
+        // embedding_length
+        push_string(&mut buf, &format!("{arch}.embedding_length"));
+        push_u32(&mut buf, 4);
+        push_u32(&mut buf, embedding_length);
+
+        buf
+    }
+
     #[test]
     fn parse_quant_q4_k_m() {
         assert_eq!(parse_quant("Qwen3.5-9B-Q4_K_M.gguf"), Some("Q4_K_M".into()));
@@ -758,6 +940,63 @@ mod tests {
     }
 
     #[test]
+    fn parse_gguf_metadata_extracts_kv_params() {
+        // Qwen2.5-7B-like: 28 layers, 4 KV heads, 28 attn heads, 3584 embedding
+        let data = sample_gguf_with_kv_metadata("qwen2", 131072, 28, 4, 28, 3584);
+        let mut cursor = Cursor::new(data);
+        let meta = parse_gguf_metadata(&mut cursor).unwrap();
+
+        assert_eq!(meta.max_context, Some(131072));
+        assert_eq!(meta.block_count, Some(28));
+        assert_eq!(meta.head_count_kv, Some(4));
+        assert_eq!(meta.head_count, Some(28));
+        assert_eq!(meta.embedding_length, Some(3584));
+
+        // head_dim = 3584 / 28 = 128
+        // kv_bytes = 2 * 28 * 4 * 128 * 2 = 57344
+        let kv = meta.kv_bytes_per_token().unwrap();
+        assert!((kv - 57344.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn kv_bytes_per_token_from_hf_config_extracts_values() {
+        let config: serde_json::Value = serde_json::from_str(
+            r#"{
+                "num_hidden_layers": 32,
+                "num_key_value_heads": 8,
+                "num_attention_heads": 32,
+                "hidden_size": 4096,
+                "max_position_embeddings": 131072
+            }"#,
+        )
+        .unwrap();
+
+        // head_dim = 4096 / 32 = 128
+        // kv_bytes = 2 * 32 * 8 * 128 * 2 = 131072
+        let kv = kv_bytes_per_token_from_hf_config(&config).unwrap();
+        assert!((kv - 131072.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn kv_bytes_per_token_hf_config_uses_text_config() {
+        let config: serde_json::Value = serde_json::from_str(
+            r#"{
+                "text_config": {
+                    "num_hidden_layers": 28,
+                    "num_key_value_heads": 4,
+                    "num_attention_heads": 28,
+                    "hidden_size": 3584
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let kv = kv_bytes_per_token_from_hf_config(&config).unwrap();
+        // head_dim = 3584/28 = 128, kv = 2*28*4*128*2 = 57344
+        assert!((kv - 57344.0).abs() < 0.01);
+    }
+
+    #[test]
     fn extract_hf_config_max_context_prefers_max_position_embeddings() {
         let value: serde_json::Value = serde_json::from_str(
             r#"{
@@ -794,6 +1033,7 @@ mod tests {
             quant: None,
             param_hint: None,
             max_context_size: None,
+            kv_bytes_per_token: None,
             source: ModelSource::ExtraDir,
         };
         assert_eq!(model.size_display(), "5.0G");
@@ -810,6 +1050,7 @@ mod tests {
             quant: None,
             param_hint: None,
             max_context_size: None,
+            kv_bytes_per_token: None,
             source: ModelSource::ExtraDir,
         };
         assert_eq!(model.size_display(), "500M");
@@ -842,6 +1083,7 @@ mod tests {
             quant: None,
             param_hint: None,
             max_context_size: None,
+            kv_bytes_per_token: None,
             source: ModelSource::ExtraDir,
         }];
         add_ollama_models(&mut models, vec![("alpha-model".into(), 200)]);

@@ -391,6 +391,7 @@ fn lmstudio_serve_returns_error() {
         quant: None,
         param_hint: None,
         max_context_size: None,
+        kv_bytes_per_token: None,
         source: ModelSource::ExtraDir,
     };
     let config = Config::default();
