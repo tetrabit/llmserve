@@ -57,6 +57,10 @@ impl Backend {
         )
     }
 
+    pub fn can_open_opencode(&self) -> bool {
+        matches!(self, Backend::LlamaServer)
+    }
+
     pub fn serve_model_reason(
         &self,
         model: &crate::models::DiscoveredModel,
@@ -413,6 +417,14 @@ mod tests {
         assert!(!Backend::MlxLm.supports_ctx_size_override());
         assert!(!Backend::Ollama.supports_ctx_size_override());
         assert!(!Backend::LmStudio.supports_ctx_size_override());
+    }
+
+    #[test]
+    fn opencode_support_is_explicitly_gated() {
+        assert!(Backend::LlamaServer.can_open_opencode());
+        assert!(!Backend::Vllm.can_open_opencode());
+        assert!(!Backend::LocalAi.can_open_opencode());
+        assert!(!Backend::Ollama.can_open_opencode());
     }
 
     #[test]
