@@ -118,6 +118,7 @@ pub struct App {
     pub confirm_port_input: String,
     pub confirm_editing_port: bool,
     pub confirm_use_model_max_ctx: bool,
+    pub confirm_common_ctx_idx: Option<usize>,
 
     // Source tree
     pub tree_nodes: Vec<TreeNode>,
@@ -201,6 +202,7 @@ impl App {
             confirm_port_input: String::new(),
             confirm_editing_port: false,
             confirm_use_model_max_ctx: false,
+            confirm_common_ctx_idx: None,
             tree_nodes,
             tree_cursor: 0,
             tree_source_filter: None,
@@ -673,6 +675,7 @@ impl App {
         self.confirm_port_input = self.next_available_port().to_string();
         self.confirm_editing_port = false;
         self.confirm_use_model_max_ctx = false;
+        self.confirm_common_ctx_idx = None;
         self.input_mode = InputMode::ConfirmServe;
     }
 
@@ -698,6 +701,42 @@ impl App {
                 .is_some_and(|backend| backend.backend.supports_ctx_size_override())
     }
 
+    pub fn confirm_common_ctx_sizes(&self) -> Vec<u32> {
+        const COMMON_CONTEXT_SIZES: [u32; 9] = [
+            4096, 8192, 16384, 32768, 65536, 131072, 262144, 524288, 1_048_576,
+        ];
+
+        let supports_override = self
+            .confirm_backend()
+            .is_some_and(|backend| backend.backend.supports_ctx_size_override());
+        if !supports_override {
+            return Vec::new();
+        }
+
+        let model_max = self.confirm_model_max_ctx();
+        COMMON_CONTEXT_SIZES
+            .into_iter()
+            .filter(|size| model_max.is_none_or(|max| *size <= max))
+            .collect()
+    }
+
+    pub fn confirm_can_cycle_common_ctx(&self) -> bool {
+        !self.confirm_common_ctx_sizes().is_empty()
+    }
+
+    pub fn confirm_ctx_source_label(&self) -> &'static str {
+        if self.confirm_use_model_max_ctx && self.confirm_can_use_model_max_ctx() {
+            "model max"
+        } else if self
+            .confirm_common_ctx_idx
+            .is_some_and(|idx| idx < self.confirm_common_ctx_sizes().len())
+        {
+            "common"
+        } else {
+            "preset default"
+        }
+    }
+
     pub fn confirm_ctx_size(&self) -> u32 {
         let backend_key = self
             .confirm_backend()
@@ -707,6 +746,11 @@ impl App {
 
         if self.confirm_use_model_max_ctx && self.confirm_can_use_model_max_ctx() {
             self.confirm_model_max_ctx().unwrap_or(preset_ctx)
+        } else if let Some(idx) = self.confirm_common_ctx_idx {
+            self.confirm_common_ctx_sizes()
+                .get(idx)
+                .copied()
+                .unwrap_or(preset_ctx)
         } else {
             preset_ctx
         }
@@ -715,7 +759,27 @@ impl App {
     pub fn confirm_toggle_max_context(&mut self) {
         if self.confirm_can_use_model_max_ctx() {
             self.confirm_use_model_max_ctx = !self.confirm_use_model_max_ctx;
+            if self.confirm_use_model_max_ctx {
+                self.confirm_common_ctx_idx = None;
+            }
         }
+    }
+
+    pub fn confirm_cycle_common_context(&mut self) {
+        let options = self.confirm_common_ctx_sizes();
+        if options.is_empty() {
+            return;
+        }
+
+        let current = self.confirm_ctx_size();
+        let next_idx = if let Some(idx) = self.confirm_common_ctx_idx {
+            (idx + 1) % options.len()
+        } else {
+            options.iter().position(|size| *size > current).unwrap_or(0)
+        };
+
+        self.confirm_use_model_max_ctx = false;
+        self.confirm_common_ctx_idx = Some(next_idx);
     }
 
     /// Whether the selected backend is compatible with the selected model's format.
@@ -753,6 +817,14 @@ impl App {
             if !self.confirm_can_use_model_max_ctx() {
                 self.confirm_use_model_max_ctx = false;
             }
+            if !self.confirm_can_cycle_common_ctx() {
+                self.confirm_common_ctx_idx = None;
+            } else if self
+                .confirm_common_ctx_idx
+                .is_some_and(|idx| idx >= self.confirm_common_ctx_sizes().len())
+            {
+                self.confirm_common_ctx_idx = Some(self.confirm_common_ctx_sizes().len() - 1);
+            }
         }
     }
 
@@ -765,6 +837,14 @@ impl App {
             };
             if !self.confirm_can_use_model_max_ctx() {
                 self.confirm_use_model_max_ctx = false;
+            }
+            if !self.confirm_can_cycle_common_ctx() {
+                self.confirm_common_ctx_idx = None;
+            } else if self
+                .confirm_common_ctx_idx
+                .is_some_and(|idx| idx >= self.confirm_common_ctx_sizes().len())
+            {
+                self.confirm_common_ctx_idx = Some(self.confirm_common_ctx_sizes().len() - 1);
             }
         }
     }

@@ -579,8 +579,10 @@ fn draw_confirm_popup(frame: &mut Frame, app: &App, tc: &ThemeColors) {
 
     let preset = app.config.preset_for(backend_key_str);
     let effective_ctx = app.confirm_ctx_size();
+    let common_ctx_sizes = app.confirm_common_ctx_sizes();
     let model_max_ctx = app.confirm_model_max_ctx();
     let can_use_model_max_ctx = app.confirm_can_use_model_max_ctx();
+    let can_cycle_common_ctx = app.confirm_can_cycle_common_ctx();
     let already_serving = app.confirm_already_serving();
 
     let compatible = app.confirm_compatible();
@@ -640,11 +642,7 @@ fn draw_confirm_popup(frame: &mut Frame, app: &App, tc: &ThemeColors) {
             format!(
                 "  Context: {} [{}] │ Max: {}",
                 effective_ctx,
-                if app.confirm_use_model_max_ctx && can_use_model_max_ctx {
-                    "model max"
-                } else {
-                    "preset default"
-                },
+                app.confirm_ctx_source_label(),
                 model_max_ctx
                     .map(|value| value.to_string())
                     .unwrap_or_else(|| "unknown".to_string())
@@ -660,6 +658,20 @@ fn draw_confirm_popup(frame: &mut Frame, app: &App, tc: &ThemeColors) {
             Style::default().fg(tc.muted),
         )]),
     ];
+
+    if can_cycle_common_ctx {
+        lines.push(Line::from(vec![Span::styled(
+            format!(
+                "  Common:  {}",
+                common_ctx_sizes
+                    .iter()
+                    .map(|size| format_ctx_size(*size))
+                    .collect::<Vec<_>>()
+                    .join(" │ ")
+            ),
+            Style::default().fg(tc.muted),
+        )]));
+    }
 
     let mut extras = Vec::new();
     if let Some(bs) = preset.batch_size {
@@ -690,8 +702,10 @@ fn draw_confirm_popup(frame: &mut Frame, app: &App, tc: &ThemeColors) {
         )]));
     } else {
         lines.push(Line::from(vec![Span::styled(
-            if can_use_model_max_ctx {
-                "  h/l:backend │ p:port │ m:max ctx │ Enter:serve │ Esc:cancel"
+            if can_cycle_common_ctx && can_use_model_max_ctx {
+                "  h/l:backend │ p:port │ c:common ctx │ m:max ctx │ Enter:serve │ Esc:cancel"
+            } else if can_cycle_common_ctx {
+                "  h/l:backend │ p:port │ c:common ctx │ m:max ctx n/a │ Enter:serve │ Esc:cancel"
             } else if model_max_ctx.is_some() {
                 "  h/l:backend │ p:port │ m:max unsupported │ Enter:serve │ Esc:cancel"
             } else {
@@ -707,6 +721,16 @@ fn draw_confirm_popup(frame: &mut Frame, app: &App, tc: &ThemeColors) {
             .wrap(Wrap { trim: false }),
         area,
     );
+}
+
+fn format_ctx_size(size: u32) -> String {
+    if size >= 1_000_000 {
+        format!("{}M", size / 1_000_000)
+    } else if size >= 1_000 {
+        format!("{}K", size / 1_000)
+    } else {
+        size.to_string()
+    }
 }
 
 fn draw_stop_popup(frame: &mut Frame, app: &App, tc: &ThemeColors) {
