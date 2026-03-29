@@ -4,6 +4,7 @@ use crate::hardware::{self, HardwareInfo};
 use crate::models::{
     add_ollama_models, discover_models, DiscoveredModel, ModelFormat, ModelSource,
 };
+use crate::opencode;
 use crate::server::{self, ServerHandle};
 use crate::theme::Theme;
 use std::collections::BTreeSet;
@@ -278,10 +279,81 @@ impl App {
         self.servers.iter().any(|s| s.model_name == model_name)
     }
 
+    pub fn open_opencode_for_selected(&mut self) {
+        let Some(model) = self.selected_model() else {
+            return;
+        };
+
+        let Some(server_idx) = self.selected_model_opencode_server_idx() else {
+            let backend_label = self
+                .active_backend()
+                .map(|b| b.backend.label())
+                .unwrap_or("this backend");
+            self.status_message = Some(format!(
+                "Start {} via a running OpenCode-compatible server first (current backend: {})",
+                model.name, backend_label
+            ));
+            return;
+        };
+
+        let Some(server) = self.servers.get(server_idx) else {
+            self.status_message = Some("OpenCode target server disappeared".into());
+            return;
+        };
+
+        match opencode::resolve_for_server(server) {
+            Ok(session) => {
+                self.show_serve = true;
+                self.push_dead_log(format!(
+                    "[opencode] prepared {} at {} using {}",
+                    session.model_id,
+                    session.base_url,
+                    session.config_path.display()
+                ));
+
+                match opencode::launch(&session) {
+                    Ok(true) => {
+                        self.push_dead_log(format!(
+                            "[opencode] launched in tmux with {}",
+                            session.launch_command
+                        ));
+                        self.status_message = Some(format!(
+                            "Opened OpenCode for {} in a tmux window",
+                            session.model_id
+                        ));
+                    }
+                    Ok(false) => {
+                        self.push_dead_log(format!(
+                            "[opencode] run manually: {}",
+                            session.launch_command
+                        ));
+                        self.status_message = Some(
+                            "Prepared OpenCode launch command in logs (auto-launch requires tmux)"
+                                .into(),
+                        );
+                    }
+                    Err(err) => {
+                        self.push_dead_log(format!("[opencode] launch failed: {}", err));
+                        self.status_message = Some(err);
+                    }
+                }
+            }
+            Err(err) => {
+                self.status_message = Some(err);
+            }
+        }
+    }
+
     pub fn next_available_port(&self) -> u16 {
         let base = self.config.preferred_port;
         let used: std::collections::HashSet<u16> = self.servers.iter().map(|s| s.port).collect();
         (base..).find(|p| !used.contains(p)).unwrap_or(base)
+    }
+
+    fn selected_model_opencode_server_idx(&self) -> Option<usize> {
+        let model = self.selected_model()?;
+        let preferred_backend = self.active_backend().map(|b| &b.backend);
+        choose_opencode_server_idx(&self.servers, &model.name, preferred_backend)
     }
 
     // -- Focus --
@@ -1658,6 +1730,43 @@ fn probe_candidate_ctx_sizes(current: u32, common: &[u32], model_max: Option<u32
     sizes.into_iter().collect()
 }
 
+fn choose_opencode_server_idx(
+    servers: &[ServerHandle],
+    model_name: &str,
+    preferred_backend: Option<&Backend>,
+) -> Option<usize> {
+    let matches: Vec<usize> = servers
+        .iter()
+        .enumerate()
+        .filter(|(_, server)| {
+            server.model_name == model_name && server.backend.can_open_opencode()
+        })
+        .map(|(idx, _)| idx)
+        .collect();
+
+    if matches.is_empty() {
+        return None;
+    }
+
+    if let Some(preferred) = preferred_backend
+        && preferred.can_open_opencode()
+    {
+        let exact: Vec<usize> = matches
+            .iter()
+            .copied()
+            .filter(|idx| servers[*idx].backend == *preferred)
+            .collect();
+        if exact.len() == 1 {
+            return exact.first().copied();
+        }
+        if exact.len() > 1 {
+            return None;
+        }
+    }
+
+    (matches.len() == 1).then(|| matches[0])
+}
+
 fn refine_midpoint(low: u32, high: u32) -> Option<u32> {
     if high <= low + 256 {
         return None;
@@ -1691,9 +1800,24 @@ fn probe_log_line(mode: ProbeMode, phase: ProbePhase, message: String) -> String
 #[cfg(test)]
 mod tests {
     use super::{
-        probe_candidate_ctx_sizes, probe_log_line, refine_midpoint, should_stop_refining,
-        ProbeMode, ProbePhase,
+        choose_opencode_server_idx, probe_candidate_ctx_sizes, probe_log_line, refine_midpoint,
+        should_stop_refining, ProbeMode, ProbePhase,
     };
+    use crate::backends::Backend;
+    use crate::server::{make_test_handle, ServerHandle};
+    use std::process::{Command, Stdio};
+
+    fn dummy_server(backend: Backend, model_name: &str, port: u16) -> ServerHandle {
+        let child = Command::new("sh")
+            .arg("-c")
+            .arg("sleep 1")
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+
+        make_test_handle(backend, model_name.into(), "127.0.0.1".into(), port, child)
+    }
 
     #[test]
     fn probe_candidates_include_current_common_and_model_max() {
@@ -1737,6 +1861,35 @@ mod tests {
             ),
             "[deep-probe] midpoint ctx 196608 ok"
         );
+    }
+
+    #[test]
+    fn choose_opencode_server_prefers_exact_backend_match() {
+        let mut servers = vec![
+            dummy_server(Backend::LlamaServer, "qwen", 8080),
+            dummy_server(Backend::LlamaServer, "other", 8081),
+        ];
+        assert_eq!(
+            choose_opencode_server_idx(&servers, "qwen", Some(&Backend::LlamaServer)),
+            Some(0)
+        );
+        for server in &mut servers {
+            let _ = server.child.kill();
+            let _ = server.child.wait();
+        }
+    }
+
+    #[test]
+    fn choose_opencode_server_rejects_unsupported_backend_matches() {
+        let mut servers = vec![dummy_server(Backend::Vllm, "qwen", 8080)];
+        assert_eq!(
+            choose_opencode_server_idx(&servers, "qwen", Some(&Backend::Vllm)),
+            None
+        );
+        for server in &mut servers {
+            let _ = server.child.kill();
+            let _ = server.child.wait();
+        }
     }
 }
 
