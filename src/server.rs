@@ -158,6 +158,27 @@ fn make_handle(
     }
 }
 
+#[cfg(test)]
+pub(crate) fn make_test_handle(
+    backend: Backend,
+    model_name: String,
+    host: String,
+    port: u16,
+    child: Child,
+) -> ServerHandle {
+    ServerHandle {
+        backend,
+        model_name,
+        pid: child.id(),
+        port,
+        host,
+        child,
+        started_at: Instant::now(),
+        log_lines: VecDeque::new(),
+        partial: String::new(),
+    }
+}
+
 pub fn launch(
     model: &DiscoveredModel,
     backend: &Backend,
