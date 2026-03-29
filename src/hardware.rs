@@ -56,9 +56,9 @@ pub fn detect_hardware() -> Option<HardwareInfo> {
 
 /// Estimate the maximum safe context size given hardware, model weight size, and KV cache cost.
 ///
-/// Formula: `max_ctx = (available_vram * 0.95 - model_weight_bytes) / kv_bytes_per_token`
+/// Formula: `max_ctx = (available_vram * 0.85 - model_weight_bytes) / kv_bytes_per_token`
 ///
-/// The 5% safety margin ensures the system retains enough VRAM for OS/desktop compositing.
+/// The 15% safety margin ensures the system retains enough VRAM for OS/desktop compositing.
 pub fn estimate_max_context(
     hw: &HardwareInfo,
     model_size_bytes: u64,
@@ -69,7 +69,7 @@ pub fn estimate_max_context(
     }
 
     let available = hw.available_bytes() as f64;
-    let safe_budget = available * 0.95;
+    let safe_budget = available * 0.85;
     let remaining = safe_budget - model_size_bytes as f64;
 
     if remaining <= 0.0 {
@@ -199,7 +199,7 @@ mod tests {
     #[test]
     fn estimate_basic_context_calculation() {
         let hw = HardwareInfo {
-            total_bytes: 24 * 1024 * 1024 * 1024, // 24 GiB
+            total_bytes: 24 * 1024 * 1024 * 1024,     // 24 GiB
             used_bytes: Some(2 * 1024 * 1024 * 1024), // 2 GiB used
             source: MemorySource::NvidiaGpu,
         };
@@ -209,8 +209,8 @@ mod tests {
         assert!(ctx.is_some());
         let ctx = ctx.unwrap();
 
-        // Available = 22 GiB, safe = 22*0.95 = 20.9 GiB, minus 8 GiB model = 12.9 GiB
-        // 12.9 GiB / 1024 bytes = ~13.2M tokens — that's enormous, sanity check it's > 1M
+        // Available = 22 GiB, safe = 22*0.85 = 18.7 GiB, minus 8 GiB model = 10.7 GiB
+        // 10.7 GiB / 1024 bytes = ~10.9M tokens — that's enormous, sanity check it's > 1M
         assert!(ctx > 1_000_000, "expected > 1M tokens, got {ctx}");
     }
 
