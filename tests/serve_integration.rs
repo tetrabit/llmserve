@@ -54,6 +54,17 @@ fn test_config(port: u16) -> Config {
         preset.flash_attn = Some(true);
     }
 
+    if let Some(preset) = config.presets.get_mut("vllm") {
+        if let Ok(tokenizer) = std::env::var("LLMSERVE_VLLM_TOKENIZER") {
+            preset.extra_args.push("--tokenizer".into());
+            preset.extra_args.push(tokenizer);
+        }
+        if let Ok(hf_config_path) = std::env::var("LLMSERVE_VLLM_HF_CONFIG") {
+            preset.extra_args.push("--hf-config-path".into());
+            preset.extra_args.push(hf_config_path);
+        }
+    }
+
     config
 }
 
@@ -83,7 +94,7 @@ fn wait_for_ready(url: &str, timeout: Duration) -> Result<(), String> {
 }
 
 /// Verify we can hit the OpenAI-compatible models endpoint.
-fn check_openai_models(port: u16) -> Result<(), String> {
+fn fetch_served_model_id(port: u16) -> Result<String, String> {
     let agent = ureq::Agent::config_builder()
         .timeout_global(Some(Duration::from_secs(5)))
         .build()
@@ -91,10 +102,29 @@ fn check_openai_models(port: u16) -> Result<(), String> {
 
     let url = format!("http://127.0.0.1:{port}/v1/models");
     match agent.get(&url).call() {
-        Ok(resp) if resp.status().as_u16() == 200 => Ok(()),
+        Ok(mut resp) if resp.status().as_u16() == 200 => {
+            let body = resp
+                .body_mut()
+                .read_to_string()
+                .map_err(|e| format!("failed to read /v1/models body: {e}"))?;
+            let json: serde_json::Value =
+                serde_json::from_str(&body).map_err(|e| format!("invalid /v1/models JSON: {e}"))?;
+            json.get("data")
+                .and_then(|data| data.as_array())
+                .and_then(|models| models.first())
+                .and_then(|model| model.get("id"))
+                .and_then(|id| id.as_str())
+                .map(|id| id.to_string())
+                .ok_or_else(|| "/v1/models did not return a model id".to_string())
+        }
         Ok(resp) => Err(format!("/v1/models returned {}", resp.status())),
         Err(e) => Err(format!("/v1/models failed: {e}")),
     }
+}
+
+/// Verify we can hit the OpenAI-compatible models endpoint.
+fn check_openai_models(port: u16) -> Result<(), String> {
+    fetch_served_model_id(port).map(|_| ())
 }
 
 /// Verify we can send a trivial completion request to the server.
@@ -105,8 +135,9 @@ fn check_completion(port: u16) -> Result<(), String> {
         .new_agent();
 
     let url = format!("http://127.0.0.1:{port}/v1/chat/completions");
+    let model_id = fetch_served_model_id(port)?;
     let body = serde_json::json!({
-        "model": "test",
+        "model": model_id,
         "messages": [{"role": "user", "content": "Say hi"}],
         "max_tokens": 4
     });
