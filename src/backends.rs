@@ -62,6 +62,10 @@ impl Backend {
         model: &crate::models::DiscoveredModel,
     ) -> Option<&'static str> {
         if model.source == crate::models::ModelSource::Ollama {
+            if matches!(self, Backend::Ollama) {
+                return None;
+            }
+
             return Some("Ollama models are registry entries, not local model files");
         }
 
@@ -385,7 +389,8 @@ mod tests {
             Some("Ollama models are registry entries, not local model files")
         );
         assert!(!Backend::LocalAi.can_serve_model(&ollama_model));
-        assert!(!Backend::Ollama.can_serve_model(&ollama_model));
+        assert!(Backend::Ollama.can_serve_model(&ollama_model));
+        assert_eq!(Backend::Ollama.serve_model_reason(&ollama_model), None);
     }
 
     #[test]
