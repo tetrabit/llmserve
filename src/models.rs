@@ -85,8 +85,8 @@ impl GgufMetadata {
     /// where `head_dim = embedding_length / head_count`.
     pub fn kv_bytes_per_token(&self) -> Option<f64> {
         let layers = self.block_count? as f64;
-        let kv_heads = self.head_count_kv? as f64;
         let head_count = self.head_count? as f64;
+        let kv_heads = self.head_count_kv.unwrap_or(self.head_count?) as f64;
         let embedding = self.embedding_length? as f64;
         if head_count == 0.0 {
             return None;
@@ -950,6 +950,20 @@ mod tests {
         // kv_bytes = 2 * 28 * 4 * 128 * 2 = 57344
         let kv = meta.kv_bytes_per_token().unwrap();
         assert!((kv - 57344.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn kv_bytes_per_token_falls_back_to_head_count_when_kv_heads_missing() {
+        let meta = GgufMetadata {
+            max_context: Some(131072),
+            block_count: Some(28),
+            head_count_kv: None,
+            head_count: Some(28),
+            embedding_length: Some(3584),
+        };
+
+        let kv = meta.kv_bytes_per_token().unwrap();
+        assert!((kv - 401408.0).abs() < 0.01);
     }
 
     #[test]
