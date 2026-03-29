@@ -146,6 +146,7 @@ fn handle_confirm(app: &mut App, key: KeyEvent) {
         KeyCode::Tab | KeyCode::Char('p') => app.confirm_toggle_port_edit(),
         KeyCode::Char('c') => app.confirm_cycle_common_context(),
         KeyCode::Char('m') => app.confirm_toggle_max_context(),
+        KeyCode::Char('g') => app.confirm_toggle_hw_guess(),
         _ => {}
     }
 }

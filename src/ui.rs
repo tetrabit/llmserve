@@ -1,8 +1,8 @@
+use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Cell, Clear, Paragraph, Row, Table, Wrap};
-use ratatui::Frame;
 
 use crate::app::{App, Focus, InputMode};
 use crate::theme::ThemeColors;
@@ -557,7 +557,7 @@ fn draw_backend_popup(frame: &mut Frame, app: &App, tc: &ThemeColors) {
 }
 
 fn draw_confirm_popup(frame: &mut Frame, app: &App, tc: &ThemeColors) {
-    let area = centered_rect(72, 18, frame.area());
+    let area = centered_rect(76, 20, frame.area());
     frame.render_widget(Clear, area);
 
     let block = Block::default()
@@ -572,7 +572,7 @@ fn draw_confirm_popup(frame: &mut Frame, app: &App, tc: &ThemeColors) {
 
     let backend = app.confirm_backend();
     let backend_label = backend.map(|b| b.backend.label()).unwrap_or("?");
-    let backend_available = backend.is_some_and(|b| b.available);
+    let backend_available = backend.is_some_and(|b| b.can_launch());
     let backend_key_str = backend
         .map(|b| crate::backends::backend_key(&b.backend))
         .unwrap_or("unknown");
@@ -583,7 +583,16 @@ fn draw_confirm_popup(frame: &mut Frame, app: &App, tc: &ThemeColors) {
     let model_max_ctx = app.confirm_model_max_ctx();
     let can_use_model_max_ctx = app.confirm_can_use_model_max_ctx();
     let can_cycle_common_ctx = app.confirm_can_cycle_common_ctx();
+    let can_use_hw_guess = app.confirm_can_use_hw_guess();
+    let hw_guess_ctx = app.confirm_hw_guess_ctx();
     let already_serving = app.confirm_already_serving();
+    let needs_vllm_tokenizer_hint = backend.is_some_and(|b| {
+        b.backend == crate::backends::Backend::Vllm
+            && app
+                .selected_model()
+                .is_some_and(|model| model.format == crate::models::ModelFormat::Gguf)
+            && !preset.extra_args.iter().any(|arg| arg == "--tokenizer")
+    });
 
     let compatible = app.confirm_compatible();
     let incompatible_reason = app.confirm_incompatible_reason();
@@ -591,6 +600,8 @@ fn draw_confirm_popup(frame: &mut Frame, app: &App, tc: &ThemeColors) {
     let backend_status = if !compatible {
         let reason = incompatible_reason.unwrap_or("incompatible");
         Span::styled(format!(" [{reason}]"), Style::default().fg(tc.error))
+    } else if backend.is_some_and(|b| b.available) && !backend_available {
+        Span::styled(" [api only]", Style::default().fg(tc.warning))
     } else if !backend_available {
         Span::styled(" [not found]", Style::default().fg(tc.error))
     } else if already_serving {
@@ -673,6 +684,24 @@ fn draw_confirm_popup(frame: &mut Frame, app: &App, tc: &ThemeColors) {
         )]));
     }
 
+    if can_use_hw_guess {
+        let hw_label = app
+            .hardware_info
+            .as_ref()
+            .map(|h| h.source.label())
+            .unwrap_or("unknown");
+        lines.push(Line::from(vec![Span::styled(
+            format!(
+                "  HW Max:  {} (via {}, 5% safety margin)",
+                hw_guess_ctx
+                    .map(|v| format_ctx_size(v))
+                    .unwrap_or_else(|| "n/a".into()),
+                hw_label,
+            ),
+            Style::default().fg(tc.accent),
+        )]));
+    }
+
     let mut extras = Vec::new();
     if let Some(bs) = preset.batch_size {
         extras.push(format!("batch:{bs}"));
@@ -693,6 +722,13 @@ fn draw_confirm_popup(frame: &mut Frame, app: &App, tc: &ThemeColors) {
         )]));
     }
 
+    if needs_vllm_tokenizer_hint {
+        lines.push(Line::from(vec![Span::styled(
+            "  Note:    vLLM GGUF usually needs --tokenizer in extra_args",
+            Style::default().fg(tc.warning),
+        )]));
+    }
+
     lines.push(Line::from(""));
 
     if app.confirm_editing_port {
@@ -702,7 +738,13 @@ fn draw_confirm_popup(frame: &mut Frame, app: &App, tc: &ThemeColors) {
         )]));
     } else {
         lines.push(Line::from(vec![Span::styled(
-            if can_cycle_common_ctx && can_use_model_max_ctx {
+            if can_use_hw_guess && can_cycle_common_ctx && can_use_model_max_ctx {
+                "  h/l:backend │ p:port │ c:ctx │ m:max │ g:guess │ Enter:serve │ Esc:cancel"
+            } else if can_use_hw_guess && can_cycle_common_ctx {
+                "  h/l:backend │ p:port │ c:ctx │ g:guess │ Enter:serve │ Esc:cancel"
+            } else if can_use_hw_guess {
+                "  h/l:backend │ p:port │ g:guess │ Enter:serve │ Esc:cancel"
+            } else if can_cycle_common_ctx && can_use_model_max_ctx {
                 "  h/l:backend │ p:port │ c:common ctx │ m:max ctx │ Enter:serve │ Esc:cancel"
             } else if can_cycle_common_ctx {
                 "  h/l:backend │ p:port │ c:common ctx │ m:max ctx n/a │ Enter:serve │ Esc:cancel"
