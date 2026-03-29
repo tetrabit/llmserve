@@ -1,5 +1,6 @@
 use std::fmt;
-use std::fs;
+use std::fs::{self, File};
+use std::io::{self, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
@@ -50,6 +51,7 @@ pub struct DiscoveredModel {
     pub size_bytes: u64,
     pub quant: Option<String>,
     pub param_hint: Option<String>,
+    pub max_context_size: Option<u32>,
     pub source: ModelSource,
 }
 
@@ -170,6 +172,7 @@ fn scan_gguf_dir(
             let mmproj = find_mmproj(parent);
             let size_bytes = fs::metadata(path).map(|m| m.len()).unwrap_or(0);
             let model_name = gguf_display_name(path, dir);
+            let max_context_size = read_gguf_max_context(path);
 
             models.push(DiscoveredModel {
                 name: model_name.clone(),
@@ -179,6 +182,7 @@ fn scan_gguf_dir(
                 size_bytes,
                 quant: parse_quant(&fname),
                 param_hint: parse_params(&model_name),
+                max_context_size,
                 source: source.clone(),
             });
         }
@@ -284,6 +288,7 @@ fn scan_mlx_models(
         } else {
             None
         };
+        let max_context_size = read_hf_config_max_context(&snap_path.join("config.json"));
 
         models.push(DiscoveredModel {
             name: friendly.clone(),
@@ -293,6 +298,7 @@ fn scan_mlx_models(
             size_bytes,
             quant,
             param_hint: parse_params(&friendly),
+            max_context_size,
             source: ModelSource::HfCache,
         });
     }
@@ -308,10 +314,274 @@ pub fn add_ollama_models(models: &mut Vec<DiscoveredModel>, ollama_models: Vec<(
             size_bytes: size,
             quant: parse_quant(&name),
             param_hint: parse_params(&name),
+            max_context_size: None,
             source: ModelSource::Ollama,
         });
     }
     models.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+}
+
+fn read_gguf_max_context(path: &Path) -> Option<u32> {
+    let mut file = File::open(path).ok()?;
+    parse_gguf_max_context(&mut file).ok().flatten()
+}
+
+fn parse_gguf_max_context<R: Read + Seek>(reader: &mut R) -> io::Result<Option<u32>> {
+    let mut magic = [0_u8; 4];
+    reader.read_exact(&mut magic)?;
+    if &magic != b"GGUF" {
+        return Ok(None);
+    }
+
+    let version = read_u32_le(reader)?;
+    let kv_count = match version {
+        1 => {
+            let _tensor_count = read_u32_le(reader)?;
+            read_u32_le(reader)? as u64
+        }
+        2 | 3 => {
+            let _tensor_count = read_u64_le(reader)?;
+            read_u64_le(reader)?
+        }
+        _ => return Ok(None),
+    };
+
+    let mut architecture = None;
+    let mut fallback_context = None;
+    let mut context_by_arch = std::collections::HashMap::new();
+
+    for _ in 0..kv_count {
+        let key = read_gguf_string(reader)?;
+        let value_type = read_u32_le(reader)?;
+
+        if key == "general.architecture" {
+            architecture = read_gguf_string_value(reader, value_type)?;
+            continue;
+        }
+
+        if let Some(prefix) = key.strip_suffix(".context_length") {
+            if let Some(value) = read_gguf_u32_value(reader, value_type)? {
+                context_by_arch.insert(prefix.to_string(), value);
+                fallback_context.get_or_insert(value);
+            }
+            continue;
+        }
+
+        skip_gguf_value(reader, value_type)?;
+    }
+
+    if let Some(arch) = architecture {
+        if let Some(value) = context_by_arch.get(&arch) {
+            return Ok(Some(*value));
+        }
+    }
+
+    Ok(fallback_context)
+}
+
+fn read_hf_config_max_context(path: &Path) -> Option<u32> {
+    let config = fs::read_to_string(path).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&config).ok()?;
+    extract_hf_config_max_context(&value)
+}
+
+fn extract_hf_config_max_context(value: &serde_json::Value) -> Option<u32> {
+    let scopes = [
+        value.get("text_config"),
+        value.get("llm_config"),
+        value.get("language_config"),
+        Some(value),
+    ];
+
+    for scope in scopes.into_iter().flatten() {
+        for key in [
+            "max_position_embeddings",
+            "model_max_length",
+            "max_sequence_length",
+            "n_positions",
+            "seq_length",
+        ] {
+            if let Some(found) = find_json_u32(scope, key) {
+                return Some(found);
+            }
+        }
+    }
+
+    None
+}
+
+fn find_json_u32(value: &serde_json::Value, target_key: &str) -> Option<u32> {
+    match value {
+        serde_json::Value::Object(map) => {
+            if let Some(found) = map.get(target_key).and_then(json_value_to_u32) {
+                return Some(found);
+            }
+            map.values()
+                .find_map(|nested| find_json_u32(nested, target_key))
+        }
+        serde_json::Value::Array(values) => values
+            .iter()
+            .find_map(|nested| find_json_u32(nested, target_key)),
+        _ => None,
+    }
+}
+
+fn json_value_to_u32(value: &serde_json::Value) -> Option<u32> {
+    value
+        .as_u64()
+        .and_then(|n| u32::try_from(n).ok())
+        .or_else(|| value.as_i64().and_then(|n| u32::try_from(n).ok()))
+}
+
+fn read_u8(reader: &mut impl Read) -> io::Result<u8> {
+    let mut buf = [0_u8; 1];
+    reader.read_exact(&mut buf)?;
+    Ok(buf[0])
+}
+
+fn read_u16_le(reader: &mut impl Read) -> io::Result<u16> {
+    let mut buf = [0_u8; 2];
+    reader.read_exact(&mut buf)?;
+    Ok(u16::from_le_bytes(buf))
+}
+
+fn read_u32_le(reader: &mut impl Read) -> io::Result<u32> {
+    let mut buf = [0_u8; 4];
+    reader.read_exact(&mut buf)?;
+    Ok(u32::from_le_bytes(buf))
+}
+
+fn read_u64_le(reader: &mut impl Read) -> io::Result<u64> {
+    let mut buf = [0_u8; 8];
+    reader.read_exact(&mut buf)?;
+    Ok(u64::from_le_bytes(buf))
+}
+
+fn read_i8(reader: &mut impl Read) -> io::Result<i8> {
+    Ok(read_u8(reader)? as i8)
+}
+
+fn read_i16_le(reader: &mut impl Read) -> io::Result<i16> {
+    let mut buf = [0_u8; 2];
+    reader.read_exact(&mut buf)?;
+    Ok(i16::from_le_bytes(buf))
+}
+
+fn read_i32_le(reader: &mut impl Read) -> io::Result<i32> {
+    let mut buf = [0_u8; 4];
+    reader.read_exact(&mut buf)?;
+    Ok(i32::from_le_bytes(buf))
+}
+
+fn read_i64_le(reader: &mut impl Read) -> io::Result<i64> {
+    let mut buf = [0_u8; 8];
+    reader.read_exact(&mut buf)?;
+    Ok(i64::from_le_bytes(buf))
+}
+
+fn read_gguf_string<R: Read>(reader: &mut R) -> io::Result<String> {
+    let len = read_u64_le(reader)?;
+    let len = usize::try_from(len)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "GGUF string too large"))?;
+    let mut buf = vec![0_u8; len];
+    reader.read_exact(&mut buf)?;
+    Ok(String::from_utf8_lossy(&buf).to_string())
+}
+
+fn read_gguf_string_value<R: Read + Seek>(
+    reader: &mut R,
+    value_type: u32,
+) -> io::Result<Option<String>> {
+    if value_type == 8 {
+        return read_gguf_string(reader).map(Some);
+    }
+    skip_gguf_value(reader, value_type)?;
+    Ok(None)
+}
+
+fn read_gguf_u32_value<R: Read + Seek>(reader: &mut R, value_type: u32) -> io::Result<Option<u32>> {
+    let value = match value_type {
+        0 => Some(read_u8(reader)? as u32),
+        1 => u32::try_from(read_i8(reader)?).ok(),
+        2 => Some(read_u16_le(reader)? as u32),
+        3 => u32::try_from(read_i16_le(reader)?).ok(),
+        4 => Some(read_u32_le(reader)?),
+        5 => u32::try_from(read_i32_le(reader)?).ok(),
+        10 => u32::try_from(read_u64_le(reader)?).ok(),
+        11 => u32::try_from(read_i64_le(reader)?).ok(),
+        _ => {
+            skip_gguf_value(reader, value_type)?;
+            None
+        }
+    };
+
+    Ok(value)
+}
+
+fn skip_gguf_value<R: Read + Seek>(reader: &mut R, value_type: u32) -> io::Result<()> {
+    match value_type {
+        0 | 1 | 7 => skip_bytes(reader, 1),
+        2 | 3 => skip_bytes(reader, 2),
+        4 | 5 | 6 => skip_bytes(reader, 4),
+        8 | 10 | 11 | 12 => {
+            if value_type == 8 {
+                let len = read_u64_le(reader)?;
+                skip_bytes(reader, len)
+            } else {
+                skip_bytes(reader, 8)
+            }
+        }
+        9 => {
+            let element_type = read_u32_le(reader)?;
+            let len = read_u64_le(reader)?;
+            skip_gguf_array(reader, element_type, len)
+        }
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("Unsupported GGUF value type {value_type}"),
+        )),
+    }
+}
+
+fn skip_gguf_array<R: Read + Seek>(reader: &mut R, element_type: u32, len: u64) -> io::Result<()> {
+    if let Some(width) = gguf_fixed_width(element_type) {
+        return skip_bytes(reader, len.saturating_mul(width));
+    }
+
+    match element_type {
+        8 => {
+            for _ in 0..len {
+                let string_len = read_u64_le(reader)?;
+                skip_bytes(reader, string_len)?;
+            }
+            Ok(())
+        }
+        9 => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "Nested GGUF arrays are not supported",
+        )),
+        _ => Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("Unsupported GGUF array element type {element_type}"),
+        )),
+    }
+}
+
+fn gguf_fixed_width(value_type: u32) -> Option<u64> {
+    match value_type {
+        0 | 1 | 7 => Some(1),
+        2 | 3 => Some(2),
+        4 | 5 | 6 => Some(4),
+        10 | 11 | 12 => Some(8),
+        _ => None,
+    }
+}
+
+fn skip_bytes(reader: &mut impl Seek, count: u64) -> io::Result<()> {
+    let delta = i64::try_from(count)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "seek overflow"))?;
+    reader.seek(SeekFrom::Current(delta))?;
+    Ok(())
 }
 
 fn find_mmproj(dir: &Path) -> Option<PathBuf> {
@@ -388,6 +658,38 @@ fn parse_params(s: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::Cursor;
+
+    fn push_u32(buf: &mut Vec<u8>, value: u32) {
+        buf.extend_from_slice(&value.to_le_bytes());
+    }
+
+    fn push_u64(buf: &mut Vec<u8>, value: u64) {
+        buf.extend_from_slice(&value.to_le_bytes());
+    }
+
+    fn push_string(buf: &mut Vec<u8>, value: &str) {
+        push_u64(buf, value.len() as u64);
+        buf.extend_from_slice(value.as_bytes());
+    }
+
+    fn sample_gguf_bytes(arch: &str, ctx: u32) -> Vec<u8> {
+        let mut buf = Vec::new();
+        buf.extend_from_slice(b"GGUF");
+        push_u32(&mut buf, 3);
+        push_u64(&mut buf, 0);
+        push_u64(&mut buf, 2);
+
+        push_string(&mut buf, "general.architecture");
+        push_u32(&mut buf, 8);
+        push_string(&mut buf, arch);
+
+        push_string(&mut buf, &format!("{arch}.context_length"));
+        push_u32(&mut buf, 4);
+        push_u32(&mut buf, ctx);
+
+        buf
+    }
 
     #[test]
     fn parse_quant_q4_k_m() {
@@ -450,6 +752,38 @@ mod tests {
     }
 
     #[test]
+    fn parse_gguf_max_context_reads_arch_specific_key() {
+        let mut cursor = Cursor::new(sample_gguf_bytes("llama", 131072));
+        assert_eq!(parse_gguf_max_context(&mut cursor).unwrap(), Some(131072));
+    }
+
+    #[test]
+    fn extract_hf_config_max_context_prefers_max_position_embeddings() {
+        let value: serde_json::Value = serde_json::from_str(
+            r#"{
+                "max_position_embeddings": 32768,
+                "rope_scaling": {"original_max_position_embeddings": 8192}
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(extract_hf_config_max_context(&value), Some(32768));
+    }
+
+    #[test]
+    fn extract_hf_config_max_context_uses_text_config_when_present() {
+        let value: serde_json::Value = serde_json::from_str(
+            r#"{
+                "vision_config": {"max_position_embeddings": 576},
+                "text_config": {"max_position_embeddings": 65536}
+            }"#,
+        )
+        .unwrap();
+
+        assert_eq!(extract_hf_config_max_context(&value), Some(65536));
+    }
+
+    #[test]
     fn size_display_gigabytes() {
         let model = DiscoveredModel {
             name: "test".into(),
@@ -459,6 +793,7 @@ mod tests {
             size_bytes: 5_368_709_120, // 5 GB
             quant: None,
             param_hint: None,
+            max_context_size: None,
             source: ModelSource::ExtraDir,
         };
         assert_eq!(model.size_display(), "5.0G");
@@ -474,6 +809,7 @@ mod tests {
             size_bytes: 524_288_000, // 500 MB
             quant: None,
             param_hint: None,
+            max_context_size: None,
             source: ModelSource::ExtraDir,
         };
         assert_eq!(model.size_display(), "500M");
@@ -505,6 +841,7 @@ mod tests {
             size_bytes: 100,
             quant: None,
             param_hint: None,
+            max_context_size: None,
             source: ModelSource::ExtraDir,
         }];
         add_ollama_models(&mut models, vec![("alpha-model".into(), 200)]);
