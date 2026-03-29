@@ -661,13 +661,12 @@ impl App {
         let Some(model) = self.selected_model() else {
             return;
         };
-        let format = model.format.clone();
 
         // Pre-select the first compatible + available backend
         let best = self
             .backends
             .iter()
-            .position(|b| b.available && b.backend.can_serve_local(&format))
+            .position(|b| b.available && b.backend.can_serve_model(model))
             .unwrap_or(self.selected_backend);
 
         self.confirm_backend_idx = best;
@@ -727,13 +726,13 @@ impl App {
         let Some(backend) = self.confirm_backend() else {
             return false;
         };
-        backend.backend.can_serve_local(&model.format)
+        backend.backend.can_serve_model(model)
     }
 
     /// Reason the selected backend can't serve local files, if any.
     pub fn confirm_incompatible_reason(&self) -> Option<&'static str> {
         self.confirm_backend()
-            .and_then(|b| b.backend.local_serve_reason())
+            .and_then(|b| b.backend.serve_model_reason(self.selected_model()?))
     }
 
     pub fn confirm_already_serving(&self) -> bool {
@@ -800,11 +799,11 @@ impl App {
             return;
         }
 
-        if !backend.backend.can_serve_local(&model.format) {
+        if !backend.backend.can_serve_model(&model) {
             let reason = backend
                 .backend
-                .local_serve_reason()
-                .unwrap_or("incompatible format");
+                .serve_model_reason(&model)
+                .unwrap_or("incompatible model");
             self.status_message = Some(format!("{}: {}", backend.backend.label(), reason));
             return;
         }

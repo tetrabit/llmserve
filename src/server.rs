@@ -163,14 +163,14 @@ pub fn launch(
     backend: &Backend,
     config: &Config,
 ) -> Result<ServerHandle, String> {
-    if !backend.can_serve_local(&model.format) {
+    if !backend.can_serve_model(model) {
         let reason = backend
-            .local_serve_reason()
-            .unwrap_or("incompatible format");
+            .serve_model_reason(model)
+            .unwrap_or("incompatible model");
         return Err(format!(
-            "{} cannot serve local {} files: {}",
+            "{} cannot serve {}: {}",
             backend.label(),
-            model.format,
+            model.name,
             reason
         ));
     }
@@ -529,5 +529,27 @@ mod tests {
         let result = launch(&model, &Backend::Vllm, &config);
         assert!(result.is_err());
         assert!(result.err().unwrap().contains("HuggingFace"));
+    }
+
+    #[test]
+    fn llama_server_rejects_ollama_registry_model() {
+        let config = Config::default();
+        let model = DiscoveredModel {
+            name: "qwen3.5:latest".into(),
+            path: "ollama:qwen3.5:latest".into(),
+            mmproj: None,
+            format: crate::models::ModelFormat::Gguf,
+            size_bytes: 0,
+            quant: None,
+            param_hint: None,
+            max_context_size: None,
+            source: crate::models::ModelSource::Ollama,
+        };
+        let result = launch(&model, &Backend::LlamaServer, &config);
+        assert!(result.is_err());
+        assert!(result
+            .err()
+            .unwrap()
+            .contains("registry entries, not local model files"));
     }
 }

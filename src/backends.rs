@@ -46,6 +46,32 @@ impl Backend {
         }
     }
 
+    pub fn can_serve_model(&self, model: &crate::models::DiscoveredModel) -> bool {
+        self.serve_model_reason(model).is_none()
+    }
+
+    pub fn supports_ctx_size_override(&self) -> bool {
+        matches!(
+            self,
+            Backend::LlamaServer | Backend::KoboldCpp | Backend::LocalAi
+        )
+    }
+
+    pub fn serve_model_reason(
+        &self,
+        model: &crate::models::DiscoveredModel,
+    ) -> Option<&'static str> {
+        if model.source == crate::models::ModelSource::Ollama {
+            return Some("Ollama models are registry entries, not local model files");
+        }
+
+        if !self.can_serve_local(&model.format) {
+            return self.local_serve_reason().or(Some("incompatible format"));
+        }
+
+        None
+    }
+
     /// Why this backend can't serve local files, if applicable.
     pub fn local_serve_reason(&self) -> Option<&'static str> {
         match self {
@@ -313,6 +339,29 @@ mod tests {
     }
 
     #[test]
+    fn registry_models_are_not_treated_as_local_files() {
+        let ollama_model = crate::models::DiscoveredModel {
+            name: "qwen3.5:latest".into(),
+            path: "ollama:qwen3.5:latest".into(),
+            mmproj: None,
+            format: crate::models::ModelFormat::Gguf,
+            size_bytes: 0,
+            quant: None,
+            param_hint: None,
+            max_context_size: None,
+            source: crate::models::ModelSource::Ollama,
+        };
+
+        assert!(!Backend::LlamaServer.can_serve_model(&ollama_model));
+        assert_eq!(
+            Backend::LlamaServer.serve_model_reason(&ollama_model),
+            Some("Ollama models are registry entries, not local model files")
+        );
+        assert!(!Backend::LocalAi.can_serve_model(&ollama_model));
+        assert!(!Backend::Ollama.can_serve_model(&ollama_model));
+    }
+
+    #[test]
     fn incompatible_backends_have_reasons() {
         assert!(Backend::Ollama.local_serve_reason().is_some());
         assert!(Backend::LmStudio.local_serve_reason().is_some());
@@ -321,6 +370,17 @@ mod tests {
         assert!(Backend::KoboldCpp.local_serve_reason().is_none());
         assert!(Backend::MlxLm.local_serve_reason().is_none());
         assert!(Backend::LocalAi.local_serve_reason().is_none());
+    }
+
+    #[test]
+    fn context_override_support_matches_launchers() {
+        assert!(Backend::LlamaServer.supports_ctx_size_override());
+        assert!(Backend::KoboldCpp.supports_ctx_size_override());
+        assert!(Backend::LocalAi.supports_ctx_size_override());
+        assert!(!Backend::MlxLm.supports_ctx_size_override());
+        assert!(!Backend::Ollama.supports_ctx_size_override());
+        assert!(!Backend::LmStudio.supports_ctx_size_override());
+        assert!(!Backend::Vllm.supports_ctx_size_override());
     }
 
     #[test]

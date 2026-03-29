@@ -390,6 +390,7 @@ fn lmstudio_serve_returns_error() {
         size_bytes: 0,
         quant: None,
         param_hint: None,
+        max_context_size: None,
         source: ModelSource::ExtraDir,
     };
     let config = Config::default();
