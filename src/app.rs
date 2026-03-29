@@ -1,13 +1,14 @@
-use crate::backends::{detect_backends, fetch_ollama_models, Backend, DetectedBackend};
+use crate::backends::{backend_key, detect_backends, fetch_ollama_models, Backend, DetectedBackend};
 use crate::config::Config;
 use crate::hardware::{self, HardwareInfo};
 use crate::models::{
     add_ollama_models, discover_models, DiscoveredModel, ModelFormat, ModelSource,
+    load_probe_result, save_probe_result,
 };
 use crate::opencode;
 use crate::server::{self, ServerHandle};
 use crate::theme::Theme;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -159,6 +160,9 @@ pub struct App {
     pub confirm_use_hw_guess: bool,
     pub confirm_probed_ctx: Option<u32>,
     probe_session: Option<ProbeSession>,
+    /// In-memory cache of persisted probe results. Loaded at startup and updated
+    /// whenever a probe completes. Keys are model file paths.
+    probe_results: HashMap<PathBuf, u32>,
 
     // Source tree
     pub tree_nodes: Vec<TreeNode>,
@@ -223,6 +227,14 @@ impl App {
         let filtered: Vec<usize> = (0..models.len()).collect();
         let tree_nodes = build_tree(&models, &config);
 
+        // Load persisted probe results for all discovered models
+        let mut probe_results = HashMap::new();
+        for model in &models {
+            if let Some(result) = load_probe_result(&model.path) {
+                probe_results.insert(model.path.clone(), result.context_size);
+            }
+        }
+
         App {
             input_mode: InputMode::Normal,
             focus: Focus::Table,
@@ -249,6 +261,7 @@ impl App {
             confirm_use_hw_guess: false,
             confirm_probed_ctx: None,
             probe_session: None,
+            probe_results,
             tree_nodes,
             tree_cursor: 0,
             tree_source_filter: None,
@@ -787,8 +800,11 @@ impl App {
         let best = self
             .backends
             .iter()
-            .position(|b| b.can_launch() && b.backend.can_serve_model(model))
+            .position(|b| b.can_launch() && b.backend.can_serve_model(&model))
             .unwrap_or(self.selected_backend);
+
+        // Clone what we need before the borrow is released
+        let model_path = model.path.clone();
 
         self.confirm_backend_idx = best;
         self.confirm_port_input = self.next_available_port().to_string();
@@ -796,7 +812,8 @@ impl App {
         self.confirm_use_model_max_ctx = false;
         self.confirm_common_ctx_idx = None;
         self.confirm_use_hw_guess = false;
-        self.confirm_probed_ctx = None;
+        // Restore persisted probe result for this model, if any
+        self.confirm_probed_ctx = self.probe_results.get(&model_path).copied();
         self.input_mode = InputMode::ConfirmServe;
     }
 
@@ -891,7 +908,6 @@ impl App {
             if self.confirm_use_model_max_ctx {
                 self.confirm_common_ctx_idx = None;
                 self.confirm_use_hw_guess = false;
-                self.confirm_probed_ctx = None;
             }
         }
     }
@@ -913,7 +929,6 @@ impl App {
         self.confirm_use_model_max_ctx = false;
         self.confirm_common_ctx_idx = Some(next_idx);
         self.confirm_use_hw_guess = false;
-        self.confirm_probed_ctx = None;
     }
 
     pub fn confirm_hw_guess_ctx(&self) -> Option<u32> {
@@ -937,7 +952,6 @@ impl App {
             if self.confirm_use_hw_guess {
                 self.confirm_use_model_max_ctx = false;
                 self.confirm_common_ctx_idx = None;
-                self.confirm_probed_ctx = None;
             }
         }
     }
@@ -1042,15 +1056,15 @@ impl App {
             let ctx = match phase {
                 ProbePhase::Refining => {
                     let Some(low) = refine_low else {
-                        self.finish_probe(last_good, first_bad);
+                        self.finish_probe(last_good, first_bad, (Some(model.path.clone()), Some(backend_key(&backend).to_string()), matches!(mode, ProbeMode::Deep)));
                         return;
                     };
                     let Some(high) = refine_high else {
-                        self.finish_probe(last_good, first_bad);
+                        self.finish_probe(last_good, first_bad, (Some(model.path.clone()), Some(backend_key(&backend).to_string()), matches!(mode, ProbeMode::Deep)));
                         return;
                     };
                     let Some(mid) = refine_midpoint(low, high) else {
-                        self.finish_probe(last_good, first_bad);
+                        self.finish_probe(last_good, first_bad, (Some(model.path.clone()), Some(backend_key(&backend).to_string()), matches!(mode, ProbeMode::Deep)));
                         return;
                     };
                     mid
@@ -1112,7 +1126,7 @@ impl App {
                         refine_attempts += 1;
 
                         if should_stop_refining(refine_low, refine_high, refine_attempts) {
-                            self.finish_probe(last_good, first_bad);
+                            self.finish_probe(last_good, first_bad, (Some(model.path.clone()), Some(backend_key(&backend).to_string()), matches!(mode, ProbeMode::Deep)));
                             return;
                         }
 
@@ -1128,14 +1142,14 @@ impl App {
                             phase = ProbePhase::Refining;
                             continue;
                         }
-                        self.finish_probe(Some(good), Some((ctx, err)));
+                        self.finish_probe(Some(good), Some((ctx, err)), (Some(model.path.clone()), Some(backend_key(&backend).to_string()), matches!(mode, ProbeMode::Deep)));
                         return;
                     }
 
                     first_bad.get_or_insert((ctx, err));
 
                     if idx == 0 {
-                        self.finish_probe(None, first_bad);
+                        self.finish_probe(None, first_bad, (Some(model.path.clone()), Some(backend_key(&backend).to_string()), matches!(mode, ProbeMode::Deep)));
                         return;
                     }
 
@@ -1146,7 +1160,12 @@ impl App {
         }
     }
 
-    fn finish_probe(&mut self, last_good: Option<u32>, first_bad: Option<(u32, String)>) {
+    fn finish_probe(
+        &mut self,
+        last_good: Option<u32>,
+        first_bad: Option<(u32, String)>,
+        meta: (Option<PathBuf>, Option<String>, bool),
+    ) {
         if let Some(ctx) = last_good {
             self.confirm_probed_ctx = Some(ctx);
             self.confirm_use_model_max_ctx = false;
@@ -1159,8 +1178,13 @@ impl App {
                 }
                 _ => format!("Probe selected ctx {}", ctx),
             });
+
+            // Persist successful probe result to disk and update in-memory cache
+            if let (Some(model_path), Some(backend), is_deep) = meta {
+                save_probe_result(&model_path, ctx, &backend, is_deep);
+                self.probe_results.insert(model_path, ctx);
+            }
         } else {
-            self.confirm_probed_ctx = None;
             self.status_message = Some(match first_bad {
                 Some((ctx, err)) => format!("Probe failed at ctx {}: {}", ctx, err),
                 None => "Context probe failed".into(),
@@ -1240,7 +1264,6 @@ impl App {
             if !self.confirm_can_use_hw_guess() {
                 self.confirm_use_hw_guess = false;
             }
-            self.confirm_probed_ctx = None;
             if !self.confirm_can_cycle_common_ctx() {
                 self.confirm_common_ctx_idx = None;
             } else if self
@@ -1265,7 +1288,6 @@ impl App {
             if !self.confirm_can_use_hw_guess() {
                 self.confirm_use_hw_guess = false;
             }
-            self.confirm_probed_ctx = None;
             if !self.confirm_can_cycle_common_ctx() {
                 self.confirm_common_ctx_idx = None;
             } else if self
@@ -1449,7 +1471,7 @@ impl App {
                     let first_bad = Some((probe.current_ctx, err.clone()));
 
                     if should_stop_refining(refine_low, refine_high, refine_attempts) {
-                        probe_done = Some((probe.last_good, first_bad));
+                        probe_done = Some((probe.last_good, first_bad, probe.model.path.clone(), backend_key(&probe.backend).to_string(), matches!(probe.mode, ProbeMode::Deep)));
                     } else {
                         probe_next = Some((
                             probe.model.clone(),
@@ -1483,7 +1505,7 @@ impl App {
                             0,
                         ));
                     } else {
-                        probe_done = Some((Some(last_good), Some((probe.current_ctx, err))));
+                        probe_done = Some((Some(last_good), Some((probe.current_ctx, err)), probe.model.path.clone(), backend_key(&probe.backend).to_string(), matches!(probe.mode, ProbeMode::Deep)));
                     }
                 } else if probe.current_idx > 0 {
                     probe_next = Some((
@@ -1501,7 +1523,7 @@ impl App {
                         0,
                     ));
                 } else {
-                    probe_done = Some((None, Some((probe.current_ctx, err))));
+                    probe_done = Some((None, Some((probe.current_ctx, err)), probe.model.path.clone(), backend_key(&probe.backend).to_string(), matches!(probe.mode, ProbeMode::Deep)));
                 }
             } else if probe.started_at.elapsed() >= PROBE_TIMEOUT {
                 let ctx = probe.current_ctx;
@@ -1524,7 +1546,7 @@ impl App {
                         let refine_attempts = probe.refine_attempts + 1;
 
                         if should_stop_refining(refine_low, refine_high, refine_attempts) {
-                            probe_done = Some((last_good, first_bad));
+                            probe_done = Some((last_good, first_bad, probe.model.path.clone(), backend_key(&probe.backend).to_string(), matches!(probe.mode, ProbeMode::Deep)));
                         } else {
                             probe_next = Some((
                                 probe.model.clone(),
@@ -1559,7 +1581,7 @@ impl App {
                         ));
                     }
                     _ => {
-                        probe_done = Some((Some(ctx), probe.first_bad.clone()));
+                        probe_done = Some((Some(ctx), probe.first_bad.clone(), probe.model.path.clone(), backend_key(&probe.backend).to_string(), matches!(probe.mode, ProbeMode::Deep)));
                     }
                 }
             } else {
@@ -1571,8 +1593,8 @@ impl App {
             self.probe_session = Some(probe);
         }
 
-        if let Some((last_good, first_bad)) = probe_done {
-            self.finish_probe(last_good, first_bad);
+        if let Some((last_good, first_bad, model_path, backend, is_deep)) = probe_done {
+            self.finish_probe(last_good, first_bad, (Some(model_path), Some(backend), is_deep));
         } else if let Some((
             model,
             backend,
