@@ -1,8 +1,8 @@
-use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Cell, Clear, Paragraph, Row, Table, Wrap};
+use ratatui::Frame;
 
 use crate::app::{App, Focus, InputMode};
 use crate::theme::ThemeColors;
@@ -643,7 +643,7 @@ fn draw_confirm_popup(frame: &mut Frame, app: &App, tc: &ThemeColors) {
                 if app.confirm_use_model_max_ctx && can_use_model_max_ctx {
                     "model max"
                 } else {
-                    "preset"
+                    "preset default"
                 },
                 model_max_ctx
                     .map(|value| value.to_string())

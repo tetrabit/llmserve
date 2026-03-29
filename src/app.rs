@@ -672,7 +672,7 @@ impl App {
         self.confirm_backend_idx = best;
         self.confirm_port_input = self.next_available_port().to_string();
         self.confirm_editing_port = false;
-        self.confirm_use_model_max_ctx = self.confirm_can_use_model_max_ctx();
+        self.confirm_use_model_max_ctx = false;
         self.input_mode = InputMode::ConfirmServe;
     }
 

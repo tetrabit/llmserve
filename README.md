@@ -101,7 +101,7 @@ When you press `Enter` on a model, a confirmation dialog opens:
 | `Enter`/`y` | Launch server |
 | `Esc`/`n` | Cancel |
 
-The dialog shows the resolved preset for the selected backend plus the model's detected max context when metadata is available. By default, models with discovered metadata open with **model max context** selected.
+The dialog shows the resolved preset for the selected backend plus the model's detected max context when metadata is available. The popup starts on the backend preset by default, and `m` opts into the model's detected max context for the current launch.
 
 ---
 
