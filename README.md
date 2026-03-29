@@ -99,10 +99,11 @@ When you press `Enter` on a model, a confirmation dialog opens:
 | `p` or `Tab` | Edit port number |
 | `c` | Cycle through common context sizes for the current backend |
 | `m` | Toggle between preset context and the model's detected max context |
+| `g` | Toggle hardware-estimated max context (auto-detects VRAM, applies 5% safety margin) |
 | `Enter`/`y` | Launch server |
 | `Esc`/`n` | Cancel |
 
-The dialog shows the resolved preset for the selected backend plus the model's detected max context when metadata is available. The popup starts on the backend preset by default, `c` cycles through common context sizes for the current launch, and `m` opts into the model's detected max context.
+The dialog shows the resolved preset for the selected backend plus the model's detected max context when metadata is available. The popup starts on the backend preset by default, `c` cycles through common context sizes for the current launch, `m` opts into the model's detected max context, and `g` selects a hardware-estimated maximum context size based on available VRAM and the model's KV cache cost (with a 5% safety margin).
 
 ---
 
@@ -121,6 +122,7 @@ The dialog shows the resolved preset for the selected backend plus the model's d
 - **Toggleable panels** — `1` hides/shows sources, `3` hides/shows logs
 - **7 themes** — Default, Dracula, Solarized, Nord, Monokai, Gruvbox, Catppuccin Mocha
 - **Vision model support** — auto-detects `mmproj` projector files and passes `--mmproj` to llama-server
+- **Hardware-aware context sizing** — press `g` in the serve dialog to auto-calculate the maximum safe context window based on available VRAM, model weight size, and KV cache cost per token (with a 5% safety margin for OS/desktop)
 
 ---
 
@@ -197,10 +199,12 @@ llmserve detects 7 backends at startup. Backends that can serve local model file
 | LocalAI | Yes | — | binary + API `:8080` + Docker | `LOCALAI_HOST` |
 | MLX | — | Yes | `python3 -c "import mlx_lm"` (macOS) | — |
 | Ollama | — | — | `GET :11434/api/tags` | `OLLAMA_HOST` |
-| vLLM | — | — | binary + API `:8000` | `VLLM_HOST` |
+| vLLM | Yes* | — | `vllm serve --help` + API `:8000` | `VLLM_HOST` |
 | LM Studio | — | — | `GET :1234/v1/models` | `LMSTUDIO_HOST` |
 
-> Backends that can't serve local files (Ollama, vLLM, LM Studio) are detected but show a clear reason in the serve dialog. They use their own model registries or manage their own servers.
+> Backends that can't serve local files (Ollama, LM Studio) are detected but show a clear reason in the serve dialog. They use their own model registries or manage their own servers.
+>
+> `*` vLLM local GGUF support is experimental, currently works best with single-file GGUF models, and usually needs tokenizer-related `extra_args`.
 
 ## Model discovery
 
@@ -236,6 +240,7 @@ src/
   backends.rs   — Backend detection (7 backends: llama-server, KoboldCpp, LocalAI, MLX, Ollama, vLLM, LM Studio)
   config.rs     — Config + per-backend presets, load/save TOML
   events.rs     — Crossterm event handling, vim-style keybindings
+  hardware.rs  — GPU VRAM / system RAM detection, max context estimation
   models.rs     — Model discovery from disk + APIs
   server.rs     — Server launch/monitor/stop, non-blocking log capture
   theme.rs      — 7 color themes

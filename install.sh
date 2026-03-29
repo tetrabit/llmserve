@@ -23,6 +23,27 @@ need() {
     command -v "$1" >/dev/null 2>&1 || err "Required tool '$1' not found. Please install it and try again."
 }
 
+check_vllm() {
+    command -v vllm >/dev/null 2>&1 && vllm serve --help >/dev/null 2>&1
+}
+
+post_install_checks() {
+    TARGET_BIN="$1"
+
+    info "Running post-install checks..."
+    if "$TARGET_BIN" --help >/dev/null 2>&1; then
+        info "Verified ${BINARY} launches successfully"
+    else
+        warn "Could not run '${TARGET_BIN} --help' automatically"
+    fi
+
+    if check_vllm; then
+        info "Detected vLLM CLI (vllm serve)"
+    else
+        warn "vLLM CLI not detected. To use the vLLM backend, install it first (for example: 'uv pip install vllm --torch-backend=auto')."
+    fi
+}
+
 # --- parse arguments ---
 
 parse_args() {
@@ -152,6 +173,7 @@ install() {
         fi
         if [ $? -eq 0 ]; then
             info "Installed ${BINARY} to /usr/local/bin/${BINARY}"
+            post_install_checks "/usr/local/bin/${BINARY}"
             return
         else
             warn "sudo failed, falling back to ~/.local/bin"
@@ -167,6 +189,7 @@ install() {
 
     mv "$BIN" "${INSTALL_DIR}/${BINARY}"
     info "Installed ${BINARY} to ${INSTALL_DIR}/${BINARY}"
+    post_install_checks "${INSTALL_DIR}/${BINARY}"
 
     # Check if install dir is in PATH
     case ":$PATH:" in
