@@ -178,11 +178,12 @@ pub fn launch(
     match backend {
         Backend::LlamaServer => launch_llama_server(model, config),
         Backend::MlxLm => launch_mlx(model, config),
+        Backend::Vllm => launch_vllm(model, config),
         Backend::KoboldCpp => launch_koboldcpp(model, config),
         Backend::LocalAi => launch_localai(model, config),
         // These are blocked by the can_serve_local check above,
         // but match exhaustively for safety.
-        Backend::Ollama | Backend::LmStudio | Backend::Vllm => Err(format!(
+        Backend::Ollama | Backend::LmStudio => Err(format!(
             "{} cannot serve local model files",
             backend.label()
         )),
@@ -295,6 +296,49 @@ fn launch_mlx(model: &DiscoveredModel, config: &Config) -> Result<ServerHandle, 
 
     Ok(make_handle(
         Backend::MlxLm,
+        model,
+        preset.port,
+        preset.host,
+        child,
+    ))
+}
+
+fn build_vllm_command(model: &DiscoveredModel, preset: &crate::config::ResolvedPreset) -> Command {
+    let mut cmd = Command::new("vllm");
+    cmd.arg("serve")
+        .arg(&model.path)
+        .arg("--host")
+        .arg(&preset.host)
+        .arg("--port")
+        .arg(preset.port.to_string())
+        .arg("--max-model-len")
+        .arg(preset.ctx_size.to_string())
+        .arg("--generation-config")
+        .arg("vllm");
+
+    if model.format == crate::models::ModelFormat::Gguf {
+        cmd.arg("--load-format").arg("gguf");
+    }
+
+    for arg in &preset.extra_args {
+        cmd.arg(arg);
+    }
+
+    cmd
+}
+
+fn launch_vllm(model: &DiscoveredModel, config: &Config) -> Result<ServerHandle, String> {
+    let preset = config.preset_for("vllm");
+    let mut cmd = build_vllm_command(model, &preset);
+
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+
+    let child = cmd
+        .spawn()
+        .map_err(|e| format!("Failed to start vllm serve: {e}"))?;
+
+    Ok(make_handle(
+        Backend::Vllm,
         model,
         preset.port,
         preset.host,
@@ -424,6 +468,14 @@ fn is_large_model(model: &DiscoveredModel) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::ffi::OsStr;
+
+    fn command_args(cmd: &Command) -> Vec<String> {
+        cmd.get_args()
+            .map(OsStr::to_string_lossy)
+            .map(|arg| arg.to_string())
+            .collect()
+    }
 
     #[test]
     fn is_large_model_by_params() {
@@ -518,11 +570,21 @@ mod tests {
     }
 
     #[test]
-    fn vllm_rejects_local_gguf() {
-        let config = Config::default();
+    fn vllm_builds_command_for_local_gguf() {
+        let mut config = Config::default();
+        config.presets.insert(
+            "vllm".into(),
+            crate::config::BackendPreset {
+                ctx_size: Some(32768),
+                host: Some("127.0.0.1".into()),
+                port: Some(9000),
+                extra_args: vec!["--tokenizer".into(), "Qwen/Qwen2.5-0.5B".into()],
+                ..Default::default()
+            },
+        );
         let model = DiscoveredModel {
             name: "test".into(),
-            path: "test.gguf".into(),
+            path: "/tmp/test.gguf".into(),
             mmproj: None,
             format: crate::models::ModelFormat::Gguf,
             size_bytes: 0,
@@ -532,9 +594,28 @@ mod tests {
             kv_bytes_per_token: None,
             source: crate::models::ModelSource::ExtraDir,
         };
-        let result = launch(&model, &Backend::Vllm, &config);
-        assert!(result.is_err());
-        assert!(result.err().unwrap().contains("HuggingFace"));
+        let preset = config.preset_for("vllm");
+        let cmd = build_vllm_command(&model, &preset);
+        assert_eq!(cmd.get_program(), OsStr::new("vllm"));
+        assert_eq!(
+            command_args(&cmd),
+            vec![
+                "serve",
+                "/tmp/test.gguf",
+                "--host",
+                "127.0.0.1",
+                "--port",
+                "9000",
+                "--max-model-len",
+                "32768",
+                "--generation-config",
+                "vllm",
+                "--load-format",
+                "gguf",
+                "--tokenizer",
+                "Qwen/Qwen2.5-0.5B",
+            ]
+        );
     }
 
     #[test]
@@ -554,9 +635,11 @@ mod tests {
         };
         let result = launch(&model, &Backend::LlamaServer, &config);
         assert!(result.is_err());
-        assert!(result
-            .err()
-            .unwrap()
-            .contains("registry entries, not local model files"));
+        assert!(
+            result
+                .err()
+                .unwrap()
+                .contains("registry entries, not local model files")
+        );
     }
 }
