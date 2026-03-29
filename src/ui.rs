@@ -2,7 +2,7 @@ use ratatui::Frame;
 use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Cell, Clear, Paragraph, Row, Table};
+use ratatui::widgets::{Block, BorderType, Borders, Cell, Clear, Paragraph, Row, Table, Wrap};
 
 use crate::app::{App, Focus, InputMode};
 use crate::theme::ThemeColors;
@@ -557,7 +557,7 @@ fn draw_backend_popup(frame: &mut Frame, app: &App, tc: &ThemeColors) {
 }
 
 fn draw_confirm_popup(frame: &mut Frame, app: &App, tc: &ThemeColors) {
-    let area = centered_rect(58, 14, frame.area());
+    let area = centered_rect(72, 18, frame.area());
     frame.render_widget(Clear, area);
 
     let block = Block::default()
@@ -578,6 +578,9 @@ fn draw_confirm_popup(frame: &mut Frame, app: &App, tc: &ThemeColors) {
         .unwrap_or("unknown");
 
     let preset = app.config.preset_for(backend_key_str);
+    let effective_ctx = app.confirm_ctx_size();
+    let model_max_ctx = app.confirm_model_max_ctx();
+    let can_use_model_max_ctx = app.confirm_can_use_model_max_ctx();
     let already_serving = app.confirm_already_serving();
 
     let compatible = app.confirm_compatible();
@@ -635,9 +638,24 @@ fn draw_confirm_popup(frame: &mut Frame, app: &App, tc: &ThemeColors) {
         ]),
         Line::from(vec![Span::styled(
             format!(
-                "  Context: {} │ Flash: {}",
-                preset.ctx_size,
-                if preset.flash_attn { "on" } else { "off" }
+                "  Context: {} [{}] │ Max: {}",
+                effective_ctx,
+                if app.confirm_use_model_max_ctx && can_use_model_max_ctx {
+                    "model max"
+                } else {
+                    "preset"
+                },
+                model_max_ctx
+                    .map(|value| value.to_string())
+                    .unwrap_or_else(|| "unknown".to_string())
+            ),
+            Style::default().fg(tc.muted),
+        )]),
+        Line::from(vec![Span::styled(
+            format!(
+                "  Flash:   {} │ Preset: {}",
+                if preset.flash_attn { "on" } else { "off" },
+                preset.ctx_size
             ),
             Style::default().fg(tc.muted),
         )]),
@@ -672,12 +690,23 @@ fn draw_confirm_popup(frame: &mut Frame, app: &App, tc: &ThemeColors) {
         )]));
     } else {
         lines.push(Line::from(vec![Span::styled(
-            "  h/l:backend │ p:port │ Enter:serve │ Esc:cancel",
+            if can_use_model_max_ctx {
+                "  h/l:backend │ p:port │ m:max ctx │ Enter:serve │ Esc:cancel"
+            } else if model_max_ctx.is_some() {
+                "  h/l:backend │ p:port │ m:max unsupported │ Enter:serve │ Esc:cancel"
+            } else {
+                "  h/l:backend │ p:port │ m:max ctx n/a │ Enter:serve │ Esc:cancel"
+            },
             Style::default().fg(tc.warning),
         )]));
     }
 
-    frame.render_widget(Paragraph::new(lines).block(block), area);
+    frame.render_widget(
+        Paragraph::new(lines)
+            .block(block)
+            .wrap(Wrap { trim: false }),
+        area,
+    );
 }
 
 fn draw_stop_popup(frame: &mut Frame, app: &App, tc: &ThemeColors) {

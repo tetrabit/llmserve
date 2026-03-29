@@ -97,10 +97,11 @@ When you press `Enter` on a model, a confirmation dialog opens:
 |-----|--------|
 | `h`/`l` or `Left`/`Right` | Cycle through backends (shows availability + already-serving status) |
 | `p` or `Tab` | Edit port number |
+| `m` | Toggle between preset context and the model's detected max context |
 | `Enter`/`y` | Launch server |
 | `Esc`/`n` | Cancel |
 
-The dialog shows the resolved preset for the selected backend (context size, flash attention, batch size, GPU layers, extra args).
+The dialog shows the resolved preset for the selected backend plus the model's detected max context when metadata is available. By default, models with discovered metadata open with **model max context** selected.
 
 ---
 

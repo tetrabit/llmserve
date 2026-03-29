@@ -163,7 +163,6 @@ pub fn launch(
     backend: &Backend,
     config: &Config,
 ) -> Result<ServerHandle, String> {
-    // Check compatibility: can this backend serve this local model file?
     if !backend.can_serve_local(&model.format) {
         let reason = backend
             .local_serve_reason()
@@ -196,12 +195,26 @@ pub fn launch_on_port(
     config: &Config,
     port: u16,
 ) -> Result<ServerHandle, String> {
+    let preset_ctx = config
+        .preset_for(crate::backends::backend_key(backend))
+        .ctx_size;
+    launch_with_overrides(model, backend, config, port, preset_ctx)
+}
+
+pub fn launch_with_overrides(
+    model: &DiscoveredModel,
+    backend: &Backend,
+    config: &Config,
+    port: u16,
+    ctx_size: u32,
+) -> Result<ServerHandle, String> {
     let mut config = config.clone();
     let key = crate::backends::backend_key(backend);
-    if let Some(preset) = config.presets.get_mut(key) {
-        preset.port = Some(port);
-    }
+    let preset = config.presets.entry(key.to_string()).or_default();
+    preset.port = Some(port);
+    preset.ctx_size = Some(ctx_size);
     config.preferred_port = port;
+    config.default_ctx_size = ctx_size;
     launch(model, backend, &config)
 }
 
@@ -422,6 +435,7 @@ mod tests {
             size_bytes: 0,
             quant: None,
             param_hint: Some("27B".into()),
+            max_context_size: None,
             source: crate::models::ModelSource::ExtraDir,
         };
         assert!(is_large_model(&model));
@@ -437,6 +451,7 @@ mod tests {
             size_bytes: 0,
             quant: None,
             param_hint: Some("9B".into()),
+            max_context_size: None,
             source: crate::models::ModelSource::ExtraDir,
         };
         assert!(!is_large_model(&model));
@@ -452,6 +467,7 @@ mod tests {
             size_bytes: 15_000_000_000,
             quant: None,
             param_hint: None,
+            max_context_size: None,
             source: crate::models::ModelSource::ExtraDir,
         };
         assert!(is_large_model(&model));
@@ -468,6 +484,7 @@ mod tests {
             size_bytes: 0,
             quant: None,
             param_hint: None,
+            max_context_size: None,
             source: crate::models::ModelSource::ExtraDir,
         };
         let result = launch(&model, &Backend::LmStudio, &config);
@@ -487,6 +504,7 @@ mod tests {
             size_bytes: 0,
             quant: None,
             param_hint: None,
+            max_context_size: None,
             source: crate::models::ModelSource::ExtraDir,
         };
         let result = launch(&model, &Backend::Ollama, &config);
@@ -505,6 +523,7 @@ mod tests {
             size_bytes: 0,
             quant: None,
             param_hint: None,
+            max_context_size: None,
             source: crate::models::ModelSource::ExtraDir,
         };
         let result = launch(&model, &Backend::Vllm, &config);

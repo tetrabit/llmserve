@@ -1,7 +1,7 @@
-use crate::backends::{Backend, DetectedBackend, detect_backends, fetch_ollama_models};
+use crate::backends::{detect_backends, fetch_ollama_models, Backend, DetectedBackend};
 use crate::config::Config;
 use crate::models::{
-    DiscoveredModel, ModelFormat, ModelSource, add_ollama_models, discover_models,
+    add_ollama_models, discover_models, DiscoveredModel, ModelFormat, ModelSource,
 };
 use crate::server::{self, ServerHandle};
 use crate::theme::Theme;
@@ -117,6 +117,7 @@ pub struct App {
     pub confirm_backend_idx: usize,
     pub confirm_port_input: String,
     pub confirm_editing_port: bool,
+    pub confirm_use_model_max_ctx: bool,
 
     // Source tree
     pub tree_nodes: Vec<TreeNode>,
@@ -199,6 +200,7 @@ impl App {
             confirm_backend_idx: selected_backend,
             confirm_port_input: String::new(),
             confirm_editing_port: false,
+            confirm_use_model_max_ctx: false,
             tree_nodes,
             tree_cursor: 0,
             tree_source_filter: None,
@@ -671,6 +673,7 @@ impl App {
         self.confirm_backend_idx = best;
         self.confirm_port_input = self.next_available_port().to_string();
         self.confirm_editing_port = false;
+        self.confirm_use_model_max_ctx = self.confirm_can_use_model_max_ctx();
         self.input_mode = InputMode::ConfirmServe;
     }
 
@@ -682,6 +685,38 @@ impl App {
         self.confirm_port_input
             .parse()
             .unwrap_or(self.next_available_port())
+    }
+
+    pub fn confirm_model_max_ctx(&self) -> Option<u32> {
+        self.selected_model()
+            .and_then(|model| model.max_context_size)
+    }
+
+    pub fn confirm_can_use_model_max_ctx(&self) -> bool {
+        self.confirm_model_max_ctx().is_some()
+            && self
+                .confirm_backend()
+                .is_some_and(|backend| backend.backend.supports_ctx_size_override())
+    }
+
+    pub fn confirm_ctx_size(&self) -> u32 {
+        let backend_key = self
+            .confirm_backend()
+            .map(|backend| crate::backends::backend_key(&backend.backend))
+            .unwrap_or("unknown");
+        let preset_ctx = self.config.preset_for(backend_key).ctx_size;
+
+        if self.confirm_use_model_max_ctx && self.confirm_can_use_model_max_ctx() {
+            self.confirm_model_max_ctx().unwrap_or(preset_ctx)
+        } else {
+            preset_ctx
+        }
+    }
+
+    pub fn confirm_toggle_max_context(&mut self) {
+        if self.confirm_can_use_model_max_ctx() {
+            self.confirm_use_model_max_ctx = !self.confirm_use_model_max_ctx;
+        }
     }
 
     /// Whether the selected backend is compatible with the selected model's format.
@@ -716,6 +751,9 @@ impl App {
     pub fn confirm_cycle_backend_right(&mut self) {
         if !self.backends.is_empty() {
             self.confirm_backend_idx = (self.confirm_backend_idx + 1) % self.backends.len();
+            if !self.confirm_can_use_model_max_ctx() {
+                self.confirm_use_model_max_ctx = false;
+            }
         }
     }
 
@@ -726,6 +764,9 @@ impl App {
             } else {
                 self.confirm_backend_idx - 1
             };
+            if !self.confirm_can_use_model_max_ctx() {
+                self.confirm_use_model_max_ctx = false;
+            }
         }
     }
 
@@ -778,18 +819,21 @@ impl App {
         }
 
         let port = self.confirm_port();
+        let ctx_size = self.confirm_ctx_size();
         if self.servers.iter().any(|s| s.port == port) {
             self.status_message = Some(format!("Port {port} is already in use"));
             return;
         }
 
-        match server::launch_on_port(&model, &backend.backend, &self.config, port) {
+        match server::launch_with_overrides(&model, &backend.backend, &self.config, port, ctx_size)
+        {
             Ok(handle) => {
                 self.status_message = Some(format!(
-                    "Started {} via {} on port {}",
+                    "Started {} via {} on port {} (ctx {})",
                     handle.model_name,
                     handle.backend.label(),
-                    handle.port
+                    handle.port,
+                    ctx_size
                 ));
                 self.servers.push(handle);
                 self.show_serve = true; // auto-show serve panel
