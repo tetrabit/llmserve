@@ -24,6 +24,7 @@ pub enum ModelSource {
     LlamaCppCache,
     HfCache,
     Ollama,
+    LlmfitCache,
     ExtraDir,
 }
 
@@ -34,6 +35,7 @@ impl fmt::Display for ModelSource {
             ModelSource::LlamaCppCache => write!(f, "llama.cpp"),
             ModelSource::HfCache => write!(f, "HF Cache"),
             ModelSource::Ollama => write!(f, "Ollama"),
+            ModelSource::LlmfitCache => write!(f, "llmfit"),
             ModelSource::ExtraDir => write!(f, "Custom"),
         }
     }
@@ -111,6 +113,17 @@ pub fn discover_models(extra_dirs: &[PathBuf]) -> Vec<DiscoveredModel> {
         &mut seen_paths,
     );
 
+    // llmfit cache — sister project model downloads
+    let llmfit_dir = std::env::var("LLMFIT_MODELS_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| home.join(".cache").join("llmfit").join("models"));
+    scan_gguf_dir(
+        &llmfit_dir,
+        ModelSource::LlmfitCache,
+        &mut models,
+        &mut seen_paths,
+    );
+
     // HuggingFace cache — MLX models
     let hf_hub = std::env::var("HF_HOME")
         .map(PathBuf::from)
@@ -156,20 +169,37 @@ fn scan_gguf_dir(
             let parent = path.parent().unwrap();
             let mmproj = find_mmproj(parent);
             let size_bytes = fs::metadata(path).map(|m| m.len()).unwrap_or(0);
-            let dir_name = parent.file_name().unwrap().to_string_lossy().to_string();
+            let model_name = gguf_display_name(path, dir);
 
             models.push(DiscoveredModel {
-                name: dir_name.clone(),
+                name: model_name.clone(),
                 path: path.to_path_buf(),
                 mmproj,
                 format: ModelFormat::Gguf,
                 size_bytes,
                 quant: parse_quant(&fname),
-                param_hint: parse_params(&dir_name),
+                param_hint: parse_params(&model_name),
                 source: source.clone(),
             });
         }
     }
+}
+
+fn gguf_display_name(path: &Path, scan_root: &Path) -> String {
+    let parent = path.parent().unwrap_or(scan_root);
+
+    if parent == scan_root {
+        return path
+            .file_stem()
+            .or_else(|| path.file_name())
+            .map(|name| name.to_string_lossy().to_string())
+            .unwrap_or_else(|| path.display().to_string());
+    }
+
+    parent
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| path.display().to_string())
 }
 
 fn scan_mlx_models(
@@ -461,6 +491,7 @@ mod tests {
         assert_eq!(ModelSource::LlamaCppCache.to_string(), "llama.cpp");
         assert_eq!(ModelSource::HfCache.to_string(), "HF Cache");
         assert_eq!(ModelSource::Ollama.to_string(), "Ollama");
+        assert_eq!(ModelSource::LlmfitCache.to_string(), "llmfit");
         assert_eq!(ModelSource::ExtraDir.to_string(), "Custom");
     }
 
@@ -485,5 +516,27 @@ mod tests {
     fn discover_models_with_empty_extra_dirs() {
         let models = discover_models(&[PathBuf::from("/nonexistent/path/12345")]);
         let _ = models.len();
+    }
+
+    #[test]
+    fn gguf_display_name_uses_file_stem_for_flat_cache_files() {
+        let root = Path::new("/home/test/.cache/llmfit/models");
+        let file = root.join("Qwen2.5-7B-Instruct-1M-Q8_0.gguf");
+
+        assert_eq!(
+            gguf_display_name(&file, root),
+            "Qwen2.5-7B-Instruct-1M-Q8_0"
+        );
+    }
+
+    #[test]
+    fn gguf_display_name_uses_parent_dir_for_nested_layouts() {
+        let root = Path::new("/home/test/.lmstudio/models");
+        let file = root
+            .join("lmstudio-community")
+            .join("Qwen3.5-9B-GGUF")
+            .join("Qwen3.5-9B-Q4_K_M.gguf");
+
+        assert_eq!(gguf_display_name(&file, root), "Qwen3.5-9B-GGUF");
     }
 }

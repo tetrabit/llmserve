@@ -206,6 +206,7 @@ llmserve detects 7 backends at startup. Backends that can serve local model file
 |--------|-------------|
 | LM Studio | `~/.lmstudio/models/` |
 | llama.cpp | `~/.cache/llm-models/` |
+| llmfit | `~/.cache/llmfit/models/` or `LLMFIT_MODELS_DIR` |
 | HuggingFace/MLX | `~/.cache/huggingface/hub/` (mlx-community repos) |
 | Ollama | Via API |
 | Custom | `extra_model_dirs` in config |

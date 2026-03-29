@@ -989,6 +989,15 @@ fn build_tree(models: &[DiscoveredModel], config: &Config) -> Vec<TreeNode> {
                     .unwrap_or_else(|_| home.join(".cache").join("huggingface").join("hub")),
             ),
         ),
+        (
+            ModelSource::LlmfitCache,
+            "llmfit",
+            Some(
+                std::env::var("LLMFIT_MODELS_DIR")
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|_| home.join(".cache").join("llmfit").join("models")),
+            ),
+        ),
         (ModelSource::Ollama, "Ollama", None),
     ];
 
