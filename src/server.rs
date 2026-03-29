@@ -635,11 +635,9 @@ mod tests {
         };
         let result = launch(&model, &Backend::LlamaServer, &config);
         assert!(result.is_err());
-        assert!(
-            result
-                .err()
-                .unwrap()
-                .contains("registry entries, not local model files")
-        );
+        assert!(result
+            .err()
+            .unwrap()
+            .contains("registry entries, not local model files"));
     }
 }

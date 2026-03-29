@@ -1,13 +1,17 @@
-use crate::backends::{Backend, DetectedBackend, detect_backends, fetch_ollama_models};
-use crate::hardware::{self, HardwareInfo};
+use crate::backends::{detect_backends, fetch_ollama_models, Backend, DetectedBackend};
 use crate::config::Config;
+use crate::hardware::{self, HardwareInfo};
 use crate::models::{
-    DiscoveredModel, ModelFormat, ModelSource, add_ollama_models, discover_models,
+    add_ollama_models, discover_models, DiscoveredModel, ModelFormat, ModelSource,
 };
 use crate::server::{self, ServerHandle};
 use crate::theme::Theme;
+use std::collections::BTreeSet;
 use std::collections::VecDeque;
 use std::path::PathBuf;
+use std::time::{Duration, Instant};
+
+const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputMode {
@@ -91,6 +95,37 @@ pub struct TreeNode {
     pub model_indices: Vec<usize>,
 }
 
+struct ProbeSession {
+    model: DiscoveredModel,
+    backend: Backend,
+    port: u16,
+    candidates: Vec<u32>,
+    phase: ProbePhase,
+    mode: ProbeMode,
+    current_idx: usize,
+    current_ctx: u32,
+    last_good: Option<u32>,
+    first_bad: Option<(u32, String)>,
+    refine_low: Option<u32>,
+    refine_high: Option<u32>,
+    refine_attempts: u8,
+    started_at: Instant,
+    handle: ServerHandle,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProbePhase {
+    Ascending,
+    Descending,
+    Refining,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProbeMode {
+    Step,
+    Deep,
+}
+
 pub struct App {
     pub input_mode: InputMode,
     pub focus: Focus,
@@ -121,6 +156,8 @@ pub struct App {
     pub confirm_use_model_max_ctx: bool,
     pub confirm_common_ctx_idx: Option<usize>,
     pub confirm_use_hw_guess: bool,
+    pub confirm_probed_ctx: Option<u32>,
+    probe_session: Option<ProbeSession>,
 
     // Source tree
     pub tree_nodes: Vec<TreeNode>,
@@ -209,6 +246,8 @@ impl App {
             confirm_use_model_max_ctx: false,
             confirm_common_ctx_idx: None,
             confirm_use_hw_guess: false,
+            confirm_probed_ctx: None,
+            probe_session: None,
             tree_nodes,
             tree_cursor: 0,
             tree_source_filter: None,
@@ -667,6 +706,7 @@ impl App {
     // -- Serve --
 
     pub fn open_confirm_serve(&mut self) {
+        self.stop_probe_session(false);
         let Some(model) = self.selected_model() else {
             return;
         };
@@ -684,6 +724,7 @@ impl App {
         self.confirm_use_model_max_ctx = false;
         self.confirm_common_ctx_idx = None;
         self.confirm_use_hw_guess = false;
+        self.confirm_probed_ctx = None;
         self.input_mode = InputMode::ConfirmServe;
     }
 
@@ -733,7 +774,9 @@ impl App {
     }
 
     pub fn confirm_ctx_source_label(&self) -> &'static str {
-        if self.confirm_use_hw_guess && self.confirm_can_use_hw_guess() {
+        if self.confirm_probed_ctx.is_some() {
+            "probe"
+        } else if self.confirm_use_hw_guess && self.confirm_can_use_hw_guess() {
             "hw guess"
         } else if self.confirm_use_model_max_ctx && self.confirm_can_use_model_max_ctx() {
             "model max"
@@ -753,7 +796,9 @@ impl App {
             .map(|backend| crate::backends::backend_key(&backend.backend))
             .unwrap_or("unknown");
         let preset_ctx = self.config.preset_for(backend_key).ctx_size;
-        if self.confirm_use_hw_guess && self.confirm_can_use_hw_guess() {
+        if let Some(ctx) = self.confirm_probed_ctx {
+            ctx
+        } else if self.confirm_use_hw_guess && self.confirm_can_use_hw_guess() {
             self.confirm_hw_guess_ctx().unwrap_or(preset_ctx)
         } else if self.confirm_use_model_max_ctx && self.confirm_can_use_model_max_ctx() {
             self.confirm_model_max_ctx().unwrap_or(preset_ctx)
@@ -769,15 +814,18 @@ impl App {
 
     pub fn confirm_toggle_max_context(&mut self) {
         if self.confirm_can_use_model_max_ctx() {
+            self.stop_probe_session(false);
             self.confirm_use_model_max_ctx = !self.confirm_use_model_max_ctx;
             if self.confirm_use_model_max_ctx {
                 self.confirm_common_ctx_idx = None;
                 self.confirm_use_hw_guess = false;
+                self.confirm_probed_ctx = None;
             }
         }
     }
 
     pub fn confirm_cycle_common_context(&mut self) {
+        self.stop_probe_session(false);
         let options = self.confirm_common_ctx_sizes();
         if options.is_empty() {
             return;
@@ -793,6 +841,7 @@ impl App {
         self.confirm_use_model_max_ctx = false;
         self.confirm_common_ctx_idx = Some(next_idx);
         self.confirm_use_hw_guess = false;
+        self.confirm_probed_ctx = None;
     }
 
     pub fn confirm_hw_guess_ctx(&self) -> Option<u32> {
@@ -811,11 +860,273 @@ impl App {
 
     pub fn confirm_toggle_hw_guess(&mut self) {
         if self.confirm_can_use_hw_guess() {
+            self.stop_probe_session(false);
             self.confirm_use_hw_guess = !self.confirm_use_hw_guess;
             if self.confirm_use_hw_guess {
                 self.confirm_use_model_max_ctx = false;
                 self.confirm_common_ctx_idx = None;
+                self.confirm_probed_ctx = None;
             }
+        }
+    }
+
+    pub fn confirm_can_probe_ctx(&self) -> bool {
+        self.confirm_backend().is_some_and(|backend| {
+            backend.available
+                && backend.can_launch()
+                && backend.backend.supports_ctx_size_override()
+                && self
+                    .selected_model()
+                    .is_some_and(|model| backend.backend.can_serve_model(model))
+        })
+    }
+
+    pub fn confirm_probe_context(&mut self) {
+        self.start_probe(ProbeMode::Step);
+    }
+
+    pub fn confirm_deep_probe_context(&mut self) {
+        self.start_probe(ProbeMode::Deep);
+    }
+
+    fn start_probe(&mut self, mode: ProbeMode) {
+        self.stop_probe_session(false);
+
+        if !self.confirm_can_probe_ctx() {
+            self.status_message =
+                Some("Context probing is unavailable for this backend/model".into());
+            return;
+        }
+
+        let Some(model) = self.selected_model().cloned() else {
+            return;
+        };
+        let Some(backend) = self.confirm_backend().map(|b| b.backend.clone()) else {
+            return;
+        };
+
+        let current_ctx = self.confirm_ctx_size();
+        let candidates = probe_candidate_ctx_sizes(
+            current_ctx,
+            &self.confirm_common_ctx_sizes(),
+            self.confirm_model_max_ctx(),
+        );
+
+        if candidates.is_empty() {
+            self.status_message = Some("No probeable context sizes are available".into());
+            return;
+        }
+
+        self.show_serve = true;
+        self.push_dead_log(format!(
+            "--- probing {} via {} ---",
+            model.name,
+            backend.label()
+        ));
+
+        let probe_port = if self.servers.iter().any(|s| s.port == self.confirm_port()) {
+            self.next_available_port()
+        } else {
+            self.confirm_port()
+        };
+
+        let start_idx = candidates
+            .iter()
+            .position(|size| *size >= current_ctx)
+            .unwrap_or(candidates.len().saturating_sub(1));
+
+        self.continue_probe_attempt(
+            model,
+            backend,
+            probe_port,
+            candidates,
+            ProbePhase::Ascending,
+            mode,
+            start_idx,
+            None,
+            None,
+            None,
+            None,
+            0,
+        );
+    }
+
+    fn continue_probe_attempt(
+        &mut self,
+        model: DiscoveredModel,
+        backend: Backend,
+        port: u16,
+        candidates: Vec<u32>,
+        mut phase: ProbePhase,
+        mode: ProbeMode,
+        mut idx: usize,
+        last_good: Option<u32>,
+        mut first_bad: Option<(u32, String)>,
+        mut refine_low: Option<u32>,
+        mut refine_high: Option<u32>,
+        mut refine_attempts: u8,
+    ) {
+        loop {
+            let ctx = match phase {
+                ProbePhase::Refining => {
+                    let Some(low) = refine_low else {
+                        self.finish_probe(last_good, first_bad);
+                        return;
+                    };
+                    let Some(high) = refine_high else {
+                        self.finish_probe(last_good, first_bad);
+                        return;
+                    };
+                    let Some(mid) = refine_midpoint(low, high) else {
+                        self.finish_probe(last_good, first_bad);
+                        return;
+                    };
+                    mid
+                }
+                _ => candidates[idx],
+            };
+            let label = if matches!(phase, ProbePhase::Descending) {
+                format!("[probe] backpedal to ctx {} on port {}", ctx, port)
+            } else if matches!(phase, ProbePhase::Refining) {
+                format!("[deep-probe] refining with ctx {} on port {}", ctx, port)
+            } else {
+                match mode {
+                    ProbeMode::Deep => format!("[deep-probe] trying ctx {} on port {}", ctx, port),
+                    ProbeMode::Step => format!("[probe] trying ctx {} on port {}", ctx, port),
+                }
+            };
+            self.push_dead_log(label);
+            self.status_message = Some(match mode {
+                ProbeMode::Deep if matches!(phase, ProbePhase::Refining) => {
+                    format!("Deep probing midpoint ctx {}", ctx)
+                }
+                ProbeMode::Deep => format!("Deep probing ctx {}", ctx),
+                ProbeMode::Step => format!("Probing ctx {}", ctx),
+            });
+
+            match server::launch_with_overrides(&model, &backend, &self.config, port, ctx) {
+                Ok(handle) => {
+                    self.probe_session = Some(ProbeSession {
+                        model,
+                        backend,
+                        port,
+                        candidates,
+                        phase,
+                        mode,
+                        current_idx: idx,
+                        current_ctx: ctx,
+                        last_good,
+                        first_bad,
+                        refine_low,
+                        refine_high,
+                        refine_attempts,
+                        started_at: Instant::now(),
+                        handle,
+                    });
+                    return;
+                }
+                Err(err) => {
+                    self.push_dead_log(match mode {
+                        ProbeMode::Deep if matches!(phase, ProbePhase::Refining) => {
+                            format!("[deep-probe] midpoint ctx {} failed: {}", ctx, err)
+                        }
+                        ProbeMode::Deep => format!("[deep-probe] ctx {} failed: {}", ctx, err),
+                        ProbeMode::Step => format!("[probe] ctx {} failed: {}", ctx, err),
+                    });
+
+                    if matches!(phase, ProbePhase::Refining) {
+                        first_bad = Some((ctx, err));
+                        refine_high = Some(ctx);
+                        refine_attempts += 1;
+
+                        if should_stop_refining(refine_low, refine_high, refine_attempts) {
+                            self.finish_probe(last_good, first_bad);
+                            return;
+                        }
+
+                        continue;
+                    }
+
+                    if let Some(good) = last_good {
+                        if matches!(mode, ProbeMode::Deep) {
+                            refine_low = Some(good);
+                            refine_high = Some(ctx);
+                            first_bad = Some((ctx, err));
+                            refine_attempts = 0;
+                            phase = ProbePhase::Refining;
+                            continue;
+                        }
+                        self.finish_probe(Some(good), Some((ctx, err)));
+                        return;
+                    }
+
+                    first_bad.get_or_insert((ctx, err));
+
+                    if idx == 0 {
+                        self.finish_probe(None, first_bad);
+                        return;
+                    }
+
+                    phase = ProbePhase::Descending;
+                    idx -= 1;
+                }
+            }
+        }
+    }
+
+    fn finish_probe(&mut self, last_good: Option<u32>, first_bad: Option<(u32, String)>) {
+        if let Some(ctx) = last_good {
+            self.confirm_probed_ctx = Some(ctx);
+            self.confirm_use_model_max_ctx = false;
+            self.confirm_common_ctx_idx = None;
+            self.confirm_use_hw_guess = false;
+            self.push_dead_log(format!("[probe] selected ctx {}", ctx));
+            self.status_message = Some(match first_bad {
+                Some((failed_ctx, _)) if failed_ctx != ctx => {
+                    format!("Probe selected ctx {} after {} failed", ctx, failed_ctx)
+                }
+                _ => format!("Probe selected ctx {}", ctx),
+            });
+        } else {
+            self.confirm_probed_ctx = None;
+            self.status_message = Some(match first_bad {
+                Some((ctx, err)) => format!("Probe failed at ctx {}: {}", ctx, err),
+                None => "Context probe failed".into(),
+            });
+        }
+    }
+
+    fn stop_probe_session(&mut self, cancelled: bool) {
+        if let Some(mut probe) = self.probe_session.take() {
+            probe.handle.drain_output();
+            if cancelled {
+                self.archive_probe_attempt(
+                    &probe,
+                    format!("[probe] cancelled at ctx {}", probe.current_ctx),
+                );
+            }
+            server::stop(&mut probe.handle);
+            if cancelled {
+                self.status_message = Some(format!("Cancelled probe at ctx {}", probe.current_ctx));
+            }
+        }
+    }
+
+    fn archive_probe_attempt(&mut self, probe: &ProbeSession, trailer: String) {
+        for line in &probe.handle.log_lines {
+            self.push_dead_log(line.clone());
+        }
+        self.push_dead_log(trailer);
+    }
+
+    fn push_dead_log(&mut self, line: String) {
+        self.dead_logs.push_back(line);
+        self.cap_dead_logs();
+    }
+
+    fn cap_dead_logs(&mut self) {
+        while self.dead_logs.len() > 200 {
+            self.dead_logs.pop_front();
         }
     }
 
@@ -857,6 +1168,7 @@ impl App {
             if !self.confirm_can_use_hw_guess() {
                 self.confirm_use_hw_guess = false;
             }
+            self.confirm_probed_ctx = None;
             if !self.confirm_can_cycle_common_ctx() {
                 self.confirm_common_ctx_idx = None;
             } else if self
@@ -881,6 +1193,7 @@ impl App {
             if !self.confirm_can_use_hw_guess() {
                 self.confirm_use_hw_guess = false;
             }
+            self.confirm_probed_ctx = None;
             if !self.confirm_can_cycle_common_ctx() {
                 self.confirm_common_ctx_idx = None;
             } else if self
@@ -907,6 +1220,7 @@ impl App {
     }
 
     pub fn do_serve(&mut self) {
+        self.stop_probe_session(true);
         self.input_mode = InputMode::Normal;
 
         let Some(model) = self.selected_model().cloned() else {
@@ -1031,12 +1345,193 @@ impl App {
     }
 
     pub fn cancel_popup(&mut self) {
+        self.stop_probe_session(true);
         self.input_mode = InputMode::Normal;
     }
 
     // -- Tick --
 
     pub fn tick(&mut self) {
+        let mut probe_next = None;
+        let mut probe_done = None;
+        let mut probe_keep = None;
+
+        if let Some(mut probe) = self.probe_session.take() {
+            probe.handle.drain_output();
+
+            if let Some(msg) = server::check_exited(&mut probe.handle) {
+                let err = probe_failure_message(&probe.handle, msg);
+                self.archive_probe_attempt(
+                    &probe,
+                    probe_log_line(
+                        probe.mode,
+                        probe.phase,
+                        format!("ctx {} failed: {}", probe.current_ctx, err),
+                    ),
+                );
+
+                if matches!(probe.phase, ProbePhase::Refining) {
+                    let refine_low = probe.refine_low;
+                    let refine_high = Some(probe.current_ctx);
+                    let refine_attempts = probe.refine_attempts + 1;
+                    let first_bad = Some((probe.current_ctx, err.clone()));
+
+                    if should_stop_refining(refine_low, refine_high, refine_attempts) {
+                        probe_done = Some((probe.last_good, first_bad));
+                    } else {
+                        probe_next = Some((
+                            probe.model.clone(),
+                            probe.backend.clone(),
+                            probe.port,
+                            probe.candidates.clone(),
+                            ProbePhase::Refining,
+                            probe.mode,
+                            probe.current_idx,
+                            probe.last_good,
+                            first_bad,
+                            refine_low,
+                            refine_high,
+                            refine_attempts,
+                        ));
+                    }
+                } else if let Some(last_good) = probe.last_good {
+                    if matches!(probe.mode, ProbeMode::Deep) {
+                        probe_next = Some((
+                            probe.model.clone(),
+                            probe.backend.clone(),
+                            probe.port,
+                            probe.candidates.clone(),
+                            ProbePhase::Refining,
+                            probe.mode,
+                            probe.current_idx,
+                            Some(last_good),
+                            Some((probe.current_ctx, err)),
+                            Some(last_good),
+                            Some(probe.current_ctx),
+                            0,
+                        ));
+                    } else {
+                        probe_done = Some((Some(last_good), Some((probe.current_ctx, err))));
+                    }
+                } else if probe.current_idx > 0 {
+                    probe_next = Some((
+                        probe.model.clone(),
+                        probe.backend.clone(),
+                        probe.port,
+                        probe.candidates.clone(),
+                        ProbePhase::Descending,
+                        probe.mode,
+                        probe.current_idx - 1,
+                        None,
+                        Some((probe.current_ctx, err)),
+                        None,
+                        Some(probe.current_ctx),
+                        0,
+                    ));
+                } else {
+                    probe_done = Some((None, Some((probe.current_ctx, err))));
+                }
+            } else if probe.started_at.elapsed() >= PROBE_TIMEOUT {
+                let ctx = probe.current_ctx;
+                self.archive_probe_attempt(
+                    &probe,
+                    probe_log_line(
+                        probe.mode,
+                        probe.phase,
+                        format!("ctx {} stayed up for 10s", ctx),
+                    ),
+                );
+                server::stop(&mut probe.handle);
+
+                match probe.phase {
+                    ProbePhase::Refining => {
+                        let last_good = Some(ctx);
+                        let first_bad = probe.first_bad.clone();
+                        let refine_low = Some(ctx);
+                        let refine_high = probe.refine_high;
+                        let refine_attempts = probe.refine_attempts + 1;
+
+                        if should_stop_refining(refine_low, refine_high, refine_attempts) {
+                            probe_done = Some((last_good, first_bad));
+                        } else {
+                            probe_next = Some((
+                                probe.model.clone(),
+                                probe.backend.clone(),
+                                probe.port,
+                                probe.candidates.clone(),
+                                ProbePhase::Refining,
+                                probe.mode,
+                                probe.current_idx,
+                                last_good,
+                                first_bad,
+                                refine_low,
+                                refine_high,
+                                refine_attempts,
+                            ));
+                        }
+                    }
+                    ProbePhase::Ascending if probe.current_idx + 1 < probe.candidates.len() => {
+                        probe_next = Some((
+                            probe.model.clone(),
+                            probe.backend.clone(),
+                            probe.port,
+                            probe.candidates.clone(),
+                            ProbePhase::Ascending,
+                            probe.mode,
+                            probe.current_idx + 1,
+                            Some(ctx),
+                            probe.first_bad.clone(),
+                            probe.refine_low,
+                            probe.refine_high,
+                            probe.refine_attempts,
+                        ));
+                    }
+                    _ => {
+                        probe_done = Some((Some(ctx), probe.first_bad.clone()));
+                    }
+                }
+            } else {
+                probe_keep = Some(probe);
+            }
+        }
+
+        if let Some(probe) = probe_keep {
+            self.probe_session = Some(probe);
+        }
+
+        if let Some((last_good, first_bad)) = probe_done {
+            self.finish_probe(last_good, first_bad);
+        } else if let Some((
+            model,
+            backend,
+            port,
+            candidates,
+            phase,
+            mode,
+            idx,
+            last_good,
+            first_bad,
+            refine_low,
+            refine_high,
+            refine_attempts,
+        )) = probe_next
+        {
+            self.continue_probe_attempt(
+                model,
+                backend,
+                port,
+                candidates,
+                phase,
+                mode,
+                idx,
+                last_good,
+                first_bad,
+                refine_low,
+                refine_high,
+                refine_attempts,
+            );
+        }
+
         // Drain output from all running servers
         for handle in &mut self.servers {
             handle.drain_output();
@@ -1059,10 +1554,7 @@ impl App {
             for line in &handle.log_lines {
                 self.dead_logs.push_back(line.clone());
             }
-            // Cap dead logs
-            while self.dead_logs.len() > 200 {
-                self.dead_logs.pop_front();
-            }
+            self.cap_dead_logs();
             self.status_message = Some(format!(
                 "{} (port {}): {msg}",
                 handle.model_name, handle.port
@@ -1077,6 +1569,15 @@ impl App {
         // Dead logs first (historical)
         for line in &self.dead_logs {
             lines.push(("", line.as_str()));
+        }
+
+        if let Some(probe) = &self.probe_session {
+            if !probe.handle.log_lines.is_empty() {
+                lines.push((probe.handle.model_name.as_str(), "─── probe ───"));
+                for line in &probe.handle.log_lines {
+                    lines.push((probe.handle.model_name.as_str(), line.as_str()));
+                }
+            }
         }
 
         // Then live server logs
@@ -1098,7 +1599,12 @@ impl App {
 
     /// Whether there are any logs to show (live or dead).
     pub fn has_logs(&self) -> bool {
-        !self.dead_logs.is_empty() || self.servers.iter().any(|s| !s.log_lines.is_empty())
+        !self.dead_logs.is_empty()
+            || self
+                .probe_session
+                .as_ref()
+                .is_some_and(|probe| !probe.handle.log_lines.is_empty())
+            || self.servers.iter().any(|s| !s.log_lines.is_empty())
     }
 
     // -- Refresh / rebuild --
@@ -1135,6 +1641,103 @@ impl App {
 
 fn first_available(backends: &[DetectedBackend]) -> usize {
     backends.iter().position(|b| b.available).unwrap_or(0)
+}
+
+fn probe_candidate_ctx_sizes(current: u32, common: &[u32], model_max: Option<u32>) -> Vec<u32> {
+    let mut sizes = BTreeSet::new();
+    sizes.insert(current);
+
+    for &size in common {
+        sizes.insert(size);
+    }
+
+    if let Some(max_ctx) = model_max {
+        sizes.insert(max_ctx);
+    }
+
+    sizes.into_iter().collect()
+}
+
+fn refine_midpoint(low: u32, high: u32) -> Option<u32> {
+    if high <= low + 256 {
+        return None;
+    }
+
+    let midpoint = low + ((high - low) / 2);
+    let rounded = (midpoint / 256) * 256;
+    if rounded <= low || rounded >= high {
+        None
+    } else {
+        Some(rounded)
+    }
+}
+
+fn should_stop_refining(low: Option<u32>, high: Option<u32>, attempts: u8) -> bool {
+    attempts >= 8
+        || low
+            .zip(high)
+            .is_none_or(|(low, high)| high.saturating_sub(low) < 2048)
+        || refine_midpoint(low.unwrap_or(0), high.unwrap_or(0)).is_none()
+}
+
+fn probe_log_line(mode: ProbeMode, phase: ProbePhase, message: String) -> String {
+    match (mode, phase) {
+        (ProbeMode::Deep, ProbePhase::Refining) => format!("[deep-probe] midpoint {message}"),
+        (ProbeMode::Deep, _) => format!("[deep-probe] {message}"),
+        _ => format!("[probe] {message}"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        probe_candidate_ctx_sizes, probe_log_line, refine_midpoint, should_stop_refining,
+        ProbeMode, ProbePhase,
+    };
+
+    #[test]
+    fn probe_candidates_include_current_common_and_model_max() {
+        let sizes = probe_candidate_ctx_sizes(8192, &[4096, 8192, 16384], Some(20000));
+        assert_eq!(sizes, vec![4096, 8192, 16384, 20000]);
+    }
+
+    #[test]
+    fn probe_candidates_dedup_and_sort() {
+        let sizes = probe_candidate_ctx_sizes(16384, &[4096, 16384, 32768], Some(32768));
+        assert_eq!(sizes, vec![4096, 16384, 32768]);
+    }
+
+    #[test]
+    fn refine_midpoint_rounds_down_to_256_boundary() {
+        assert_eq!(refine_midpoint(131072, 262144), Some(196608));
+    }
+
+    #[test]
+    fn refine_midpoint_returns_none_when_gap_too_small() {
+        assert_eq!(refine_midpoint(8192, 8448), None);
+    }
+
+    #[test]
+    fn refining_stops_on_small_gap() {
+        assert!(should_stop_refining(Some(131072), Some(132096), 0));
+    }
+
+    #[test]
+    fn refining_stops_after_attempt_limit() {
+        assert!(should_stop_refining(Some(131072), Some(262144), 8));
+    }
+
+    #[test]
+    fn deep_probe_log_line_marks_refinement() {
+        assert_eq!(
+            probe_log_line(
+                ProbeMode::Deep,
+                ProbePhase::Refining,
+                "ctx 196608 ok".into()
+            ),
+            "[deep-probe] midpoint ctx 196608 ok"
+        );
+    }
 }
 
 /// Build the source tree from discovered models.
@@ -1313,4 +1916,14 @@ fn shorten_path(path: &PathBuf, home: &PathBuf) -> String {
     } else {
         path.display().to_string()
     }
+}
+
+fn probe_failure_message(handle: &ServerHandle, msg: String) -> String {
+    handle
+        .log_lines
+        .iter()
+        .rev()
+        .find(|line| !line.trim().is_empty())
+        .map(|line| format!("{msg}; last log: {line}"))
+        .unwrap_or(msg)
 }

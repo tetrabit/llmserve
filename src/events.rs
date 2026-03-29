@@ -147,6 +147,8 @@ fn handle_confirm(app: &mut App, key: KeyEvent) {
         KeyCode::Char('c') => app.confirm_cycle_common_context(),
         KeyCode::Char('m') => app.confirm_toggle_max_context(),
         KeyCode::Char('g') => app.confirm_toggle_hw_guess(),
+        KeyCode::Char('P') => app.confirm_probe_context(),
+        KeyCode::Char('D') => app.confirm_deep_probe_context(),
         _ => {}
     }
 }

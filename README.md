@@ -99,11 +99,13 @@ When you press `Enter` on a model, a confirmation dialog opens:
 | `p` or `Tab` | Edit port number |
 | `c` | Cycle through common context sizes for the current backend |
 | `m` | Toggle between preset context and the model's detected max context |
-| `g` | Toggle hardware-estimated max context (auto-detects VRAM, applies 5% safety margin) |
+| `g` | Toggle hardware-estimated max context (auto-detects VRAM, applies 15% safety margin) |
+| `P` | Empirically probe larger context sizes until launch fails, then keep the last good value |
+| `D` | Deep probe: step upward until failure, then binary-refine between the last good and first bad context |
 | `Enter`/`y` | Launch server |
 | `Esc`/`n` | Cancel |
 
-The dialog shows the resolved preset for the selected backend plus the model's detected max context when metadata is available. The popup starts on the backend preset by default, `c` cycles through common context sizes for the current launch, `m` opts into the model's detected max context, and `g` selects a hardware-estimated maximum context size based on available VRAM and the model's KV cache cost (with a 5% safety margin).
+The dialog shows the resolved preset for the selected backend plus the model's detected max context when metadata is available. The popup starts on the backend preset by default, `c` cycles through common context sizes for the current launch, `m` opts into the model's detected max context, `g` selects a hardware-estimated maximum context size based on available VRAM and the model's KV cache cost (with a 15% safety margin), `P` probes progressively larger context sizes until the backend fails and then keeps the last known good value, and `D` performs the same upward probe before binary-refining between the last good and first bad context values for a tighter maximum.
 
 ---
 
@@ -122,7 +124,7 @@ The dialog shows the resolved preset for the selected backend plus the model's d
 - **Toggleable panels** — `1` hides/shows sources, `3` hides/shows logs
 - **7 themes** — Default, Dracula, Solarized, Nord, Monokai, Gruvbox, Catppuccin Mocha
 - **Vision model support** — auto-detects `mmproj` projector files and passes `--mmproj` to llama-server
-- **Hardware-aware context sizing** — press `g` in the serve dialog to auto-calculate the maximum safe context window based on available VRAM, model weight size, and KV cache cost per token (with a 5% safety margin for OS/desktop)
+- **Hardware-aware context sizing** — press `g` in the serve dialog to auto-calculate the maximum safe context window based on available VRAM, model weight size, and KV cache cost per token (with a 15% safety margin for OS/desktop)
 
 ---
 
