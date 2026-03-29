@@ -1,3 +1,4 @@
+use serde::{Deserialize, Serialize};
 use std::fmt;
 use std::fs::{self, File};
 use std::io::{self, Read, Seek, SeekFrom};
@@ -1126,4 +1127,64 @@ mod tests {
 
         assert_eq!(gguf_display_name(&file, root), "Qwen3.5-9B-GGUF");
     }
+}
+
+
+/// Probe result stored alongside a model for persistence across sessions.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelProbeResult {
+    /// Context size that successfully loaded.
+    pub context_size: u32,
+    /// Backend key used during the probe (e.g. "llama-server").
+    pub backend: String,
+    /// Whether this was a deep-probe (binary refinement) vs a step probe.
+    pub deep: bool,
+    /// RFC 3339 timestamp of when the probe completed.
+    pub timestamp: String,
+}
+
+/// Returns the path to the probe result JSON file for a given model path.
+/// Places it next to the model with a `.llmserve_probe.json` name.
+pub fn probe_result_path(model_path: &Path) -> PathBuf {
+    model_path
+        .parent()
+        .map(|p| p.join(".llmserve_probe.json"))
+        .unwrap_or_else(|| PathBuf::from(".llmserve_probe.json"))
+}
+
+/// Saves a probe result to disk. Silently ignores IO/serde errors so probe
+/// failures never surface to the user as a blocking error.
+pub fn save_probe_result(
+    model_path: &Path,
+    context_size: u32,
+    backend: &str,
+    deep: bool,
+) {
+use std::time::{SystemTime, UNIX_EPOCH};
+
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs().to_string())
+        .unwrap_or_default();
+    let result = ModelProbeResult {
+        context_size,
+        backend: backend.to_string(),
+        deep,
+        timestamp,
+    };
+    let json = match serde_json::to_string_pretty(&result) {
+        Ok(j) => j,
+        Err(_) => return,
+    };
+    let path = probe_result_path(model_path);
+    if let Err(e) = fs::write(&path, json) {
+        eprintln!("llmserve: failed to write probe result to {:?}: {}", path, e);
+    }
+}
+
+/// Loads a probe result from disk, if one exists and is valid.
+pub fn load_probe_result(model_path: &Path) -> Option<ModelProbeResult> {
+    let path = probe_result_path(model_path);
+    let json = fs::read_to_string(&path).ok()?;
+    serde_json::from_str(&json).ok()
 }
