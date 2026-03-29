@@ -29,7 +29,7 @@ impl Backend {
     pub fn can_serve_local_gguf(&self) -> bool {
         matches!(
             self,
-            Backend::LlamaServer | Backend::KoboldCpp | Backend::LocalAi
+            Backend::LlamaServer | Backend::Vllm | Backend::KoboldCpp | Backend::LocalAi
         )
     }
 
@@ -53,7 +53,7 @@ impl Backend {
     pub fn supports_ctx_size_override(&self) -> bool {
         matches!(
             self,
-            Backend::LlamaServer | Backend::KoboldCpp | Backend::LocalAi
+            Backend::LlamaServer | Backend::Vllm | Backend::KoboldCpp | Backend::LocalAi
         )
     }
 
@@ -78,7 +78,7 @@ impl Backend {
             Backend::LlamaServer | Backend::KoboldCpp | Backend::MlxLm | Backend::LocalAi => None,
             Backend::Ollama => Some("Ollama uses its own model registry, not local files"),
             Backend::LmStudio => Some("LM Studio manages its own server"),
-            Backend::Vllm => Some("vLLM expects HuggingFace model IDs, not local GGUF files"),
+            Backend::Vllm => Some("vLLM does not serve MLX model directories"),
         }
     }
 }
@@ -92,8 +92,24 @@ pub struct DetectedBackend {
 }
 
 impl DetectedBackend {
+    pub fn can_launch(&self) -> bool {
+        match self.backend {
+            Backend::LlamaServer | Backend::Vllm | Backend::KoboldCpp | Backend::LocalAi => {
+                self.binary_path.is_some()
+            }
+            Backend::MlxLm => self.available,
+            Backend::Ollama | Backend::LmStudio => false,
+        }
+    }
+
     pub fn status_label(&self) -> &'static str {
-        if self.available { "ready" } else { "not found" }
+        if self.can_launch() {
+            "ready"
+        } else if self.available {
+            "api"
+        } else {
+            "not found"
+        }
     }
 }
 
@@ -135,6 +151,16 @@ fn find_binary(name: &str) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+fn validate_binary(name: &str, args: &[&str]) -> Option<String> {
+    let binary = find_binary(name)?;
+    let ok = Command::new(&binary)
+        .args(args)
+        .output()
+        .ok()
+        .is_some_and(|o| o.status.success());
+    ok.then_some(binary)
+}
+
 /// Returns Ollama model list: Vec<(name, size_bytes)>
 pub fn fetch_ollama_models(api_url: &str) -> Vec<(String, u64)> {
     let url = format!("{api_url}/api/tags");
@@ -162,7 +188,7 @@ pub fn fetch_ollama_models(api_url: &str) -> Vec<(String, u64)> {
 }
 
 fn detect_llama_server() -> DetectedBackend {
-    let result = find_binary("llama-server");
+    let result = validate_binary("llama-server", &["--help"]);
 
     DetectedBackend {
         backend: Backend::LlamaServer,
@@ -241,7 +267,7 @@ fn detect_vllm() -> DetectedBackend {
     let server_running = agent.get(&format!("{url}/v1/models")).call().is_ok();
 
     // Also check for the vllm binary so we can launch it
-    let binary = find_binary("vllm");
+    let binary = validate_binary("vllm", &["serve", "--help"]);
 
     DetectedBackend {
         backend: Backend::Vllm,
@@ -252,7 +278,7 @@ fn detect_vllm() -> DetectedBackend {
 }
 
 fn detect_koboldcpp() -> DetectedBackend {
-    let binary = find_binary("koboldcpp");
+    let binary = validate_binary("koboldcpp", &["--help"]);
 
     // Also check for a running KoboldCpp server (default port 5001)
     let url = std::env::var("KOBOLDCPP_HOST").unwrap_or_else(|_| "http://localhost:5001".into());
@@ -277,7 +303,7 @@ fn detect_localai() -> DetectedBackend {
     let server_running = agent.get(&format!("{url}/v1/models")).call().is_ok();
 
     // Also check for the local-ai binary
-    let binary = find_binary("local-ai");
+    let binary = validate_binary("local-ai", &["--help"]);
 
     // Check if it's running via Docker (look for localai container)
     let docker_running = Command::new("docker")
@@ -320,11 +346,11 @@ mod tests {
         use crate::models::ModelFormat;
         // Can serve local GGUF files
         assert!(Backend::LlamaServer.can_serve_local_gguf());
+        assert!(Backend::Vllm.can_serve_local_gguf());
         assert!(Backend::KoboldCpp.can_serve_local_gguf());
         assert!(Backend::LocalAi.can_serve_local_gguf());
         // Cannot serve local GGUF files (use their own registries)
         assert!(!Backend::Ollama.can_serve_local_gguf());
-        assert!(!Backend::Vllm.can_serve_local_gguf());
         assert!(!Backend::LmStudio.can_serve_local_gguf());
         // MLX
         assert!(Backend::MlxLm.can_serve_local_mlx());
@@ -376,12 +402,12 @@ mod tests {
     #[test]
     fn context_override_support_matches_launchers() {
         assert!(Backend::LlamaServer.supports_ctx_size_override());
+        assert!(Backend::Vllm.supports_ctx_size_override());
         assert!(Backend::KoboldCpp.supports_ctx_size_override());
         assert!(Backend::LocalAi.supports_ctx_size_override());
         assert!(!Backend::MlxLm.supports_ctx_size_override());
         assert!(!Backend::Ollama.supports_ctx_size_override());
         assert!(!Backend::LmStudio.supports_ctx_size_override());
-        assert!(!Backend::Vllm.supports_ctx_size_override());
     }
 
     #[test]
@@ -412,6 +438,14 @@ mod tests {
             api_url: None,
         };
         assert_eq!(unavailable.status_label(), "not found");
+
+        let api_only = DetectedBackend {
+            backend: Backend::Vllm,
+            available: true,
+            binary_path: None,
+            api_url: Some("http://localhost:8000".into()),
+        };
+        assert_eq!(api_only.status_label(), "api");
     }
 
     #[test]
