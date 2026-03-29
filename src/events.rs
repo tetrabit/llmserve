@@ -75,6 +75,7 @@ fn handle_normal(app: &mut App, key: KeyEvent) {
 
         // Backend
         KeyCode::Char('b') => app.open_backend_popup(),
+        KeyCode::Char('O') => app.open_opencode_for_selected(),
 
         // Stop server
         KeyCode::Char('s') => app.open_stop_popup(),

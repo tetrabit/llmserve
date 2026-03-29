@@ -81,6 +81,7 @@ Focus cycles between visible panels with `Tab`. Resize the focused panel with `S
 | `b` | Pick default backend |
 | `f` | Cycle format filter (All / GGUF / MLX) |
 | `o` | Cycle sort (Name / Size / Source) |
+| `O` | Prepare OpenCode for the selected running llama-server model (auto-launches in tmux when available) |
 | `s` | Stop a server |
 | `S` | Stop all servers |
 | `w` | Toggle log word wrap |

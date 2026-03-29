@@ -486,7 +486,7 @@ fn draw_status_bar(frame: &mut Frame, app: &App, area: Rect, tc: &ThemeColors) {
             "w:wrap │ C:clear │ s:stop │ S:stop-all │ S+←→:resize │ 1:tree │ 3:logs │ Tab:next │ q:quit"
         }
         _ => {
-            "Tab:next │ j/k:nav │ /:search │ Enter:serve │ s:stop │ 1:tree │ 3:logs │ S+←→:resize │ q:quit"
+            "Tab:next │ j/k:nav │ /:search │ Enter:serve │ O:opencode │ s:stop │ 1:tree │ 3:logs │ S+←→:resize │ q:quit"
         }
     };
 
