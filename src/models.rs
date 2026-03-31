@@ -91,6 +91,17 @@ pub fn discover_models(extra_dirs: &[PathBuf]) -> Vec<DiscoveredModel> {
         &mut seen_paths,
     );
 
+    // LM Studio newer versions may use ~/.cache/lm-studio/models/
+    let lmstudio_cache_dir = home.join(".cache").join("lm-studio").join("models");
+    if lmstudio_cache_dir.is_dir() && lmstudio_cache_dir != lmstudio_dir {
+        scan_gguf_dir(
+            &lmstudio_cache_dir,
+            ModelSource::LmStudio,
+            &mut models,
+            &mut seen_paths,
+        );
+    }
+
     // llama.cpp cache — on Windows use %LOCALAPPDATA%/llm-models as fallback
     let llamacpp_dir = if cfg!(windows) {
         let cache = home.join(".cache").join("llm-models");
@@ -266,6 +277,32 @@ fn scan_mlx_models(
             source: ModelSource::HfCache,
         });
     }
+}
+
+pub fn add_lmstudio_models(models: &mut Vec<DiscoveredModel>, api_models: Vec<(String, u64)>) {
+    let existing: std::collections::HashSet<String> = models
+        .iter()
+        .filter(|m| m.source == ModelSource::LmStudio)
+        .map(|m| m.name.clone())
+        .collect();
+
+    for (id, size) in api_models {
+        // Skip if we already discovered this model from disk
+        if existing.contains(&id) {
+            continue;
+        }
+        models.push(DiscoveredModel {
+            name: id.clone(),
+            path: PathBuf::from(format!("lmstudio:{id}")),
+            mmproj: None,
+            format: ModelFormat::Gguf,
+            size_bytes: size,
+            quant: parse_quant(&id),
+            param_hint: parse_params(&id),
+            source: ModelSource::LmStudio,
+        });
+    }
+    models.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
 }
 
 pub fn add_ollama_models(models: &mut Vec<DiscoveredModel>, ollama_models: Vec<(String, u64)>) {

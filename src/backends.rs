@@ -208,6 +208,31 @@ fn detect_lmstudio() -> DetectedBackend {
     }
 }
 
+/// Returns LM Studio model list from API: Vec<(id, size_bytes)>
+/// LM Studio exposes an OpenAI-compatible /v1/models endpoint.
+pub fn fetch_lmstudio_models(api_url: &str) -> Vec<(String, u64)> {
+    let url = format!("{api_url}/v1/models");
+    let agent = http_agent();
+    let Ok(mut response) = agent.get(&url).call() else {
+        return Vec::new();
+    };
+    let Ok(body) = response.body_mut().read_to_string() else {
+        return Vec::new();
+    };
+    let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) else {
+        return Vec::new();
+    };
+    let Some(data) = json.get("data").and_then(|d| d.as_array()) else {
+        return Vec::new();
+    };
+    data.iter()
+        .filter_map(|m| {
+            let id = m.get("id")?.as_str()?.to_string();
+            Some((id, 0u64))
+        })
+        .collect()
+}
+
 fn detect_vllm() -> DetectedBackend {
     // Check for running vLLM server first (default port 8000, OpenAI-compatible)
     let url = std::env::var("VLLM_HOST").unwrap_or_else(|_| "http://localhost:8000".into());

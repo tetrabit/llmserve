@@ -1,7 +1,10 @@
-use crate::backends::{Backend, DetectedBackend, detect_backends, fetch_ollama_models};
+use crate::backends::{
+    Backend, DetectedBackend, detect_backends, fetch_lmstudio_models, fetch_ollama_models,
+};
 use crate::config::Config;
 use crate::models::{
-    DiscoveredModel, ModelFormat, ModelSource, add_ollama_models, discover_models,
+    DiscoveredModel, ModelFormat, ModelSource, add_lmstudio_models, add_ollama_models,
+    discover_models,
 };
 use crate::server::{self, ServerHandle};
 use crate::theme::Theme;
@@ -160,6 +163,15 @@ impl App {
                 if let Some(ref url) = ollama.api_url {
                     let ollama_models = fetch_ollama_models(url);
                     add_ollama_models(&mut models, ollama_models);
+                }
+            }
+        }
+
+        if let Some(lmstudio) = backends.iter().find(|b| b.backend == Backend::LmStudio) {
+            if lmstudio.available {
+                if let Some(ref url) = lmstudio.api_url {
+                    let lmstudio_models = fetch_lmstudio_models(url);
+                    add_lmstudio_models(&mut models, lmstudio_models);
                 }
             }
         }
@@ -947,6 +959,19 @@ impl App {
             }
         }
 
+        if let Some(lmstudio) = self
+            .backends
+            .iter()
+            .find(|b| b.backend == Backend::LmStudio)
+        {
+            if lmstudio.available {
+                if let Some(ref url) = lmstudio.api_url {
+                    let lmstudio_models = fetch_lmstudio_models(url);
+                    add_lmstudio_models(&mut self.models, lmstudio_models);
+                }
+            }
+        }
+
         self.tree_nodes = build_tree(&self.models, &self.config);
         self.apply_filters();
     }
@@ -970,11 +995,17 @@ fn build_tree(models: &[DiscoveredModel], config: &Config) -> Vec<TreeNode> {
 
     // Built-in sources
     let builtins: Vec<(ModelSource, &str, Option<PathBuf>)> = vec![
-        (
-            ModelSource::LmStudio,
-            "LM Studio",
-            Some(home.join(".lmstudio").join("models")),
-        ),
+        (ModelSource::LmStudio, "LM Studio", {
+            let primary = home.join(".lmstudio").join("models");
+            let cache = home.join(".cache").join("lm-studio").join("models");
+            if primary.is_dir() {
+                Some(primary)
+            } else if cache.is_dir() {
+                Some(cache)
+            } else {
+                Some(primary)
+            }
+        }),
         (
             ModelSource::LlamaCppCache,
             "llama.cpp",
