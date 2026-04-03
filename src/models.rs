@@ -27,6 +27,8 @@ pub enum ModelSource {
     HfCache,
     Ollama,
     LlmfitCache,
+    Lemonade,
+    FastFlowLm,
     ExtraDir,
 }
 
@@ -38,6 +40,8 @@ impl fmt::Display for ModelSource {
             ModelSource::HfCache => write!(f, "HF Cache"),
             ModelSource::Ollama => write!(f, "Ollama"),
             ModelSource::LlmfitCache => write!(f, "llmfit"),
+            ModelSource::Lemonade => write!(f, "Lemonade"),
+            ModelSource::FastFlowLm => write!(f, "FastFlowLM"),
             ModelSource::ExtraDir => write!(f, "Custom"),
         }
     }
@@ -59,6 +63,9 @@ pub struct DiscoveredModel {
 
 impl DiscoveredModel {
     pub fn size_display(&self) -> String {
+        if self.size_bytes == 0 {
+            return "-".into();
+        }
         let gb = self.size_bytes as f64 / 1_073_741_824.0;
         if gb >= 1.0 {
             format!("{:.1}G", gb)
@@ -165,6 +172,17 @@ pub fn discover_models(extra_dirs: &[PathBuf]) -> Vec<DiscoveredModel> {
         &mut models,
         &mut seen_paths,
     );
+
+    // LM Studio newer versions may use ~/.cache/lm-studio/models/
+    let lmstudio_cache_dir = home.join(".cache").join("lm-studio").join("models");
+    if lmstudio_cache_dir.is_dir() && lmstudio_cache_dir != lmstudio_dir {
+        scan_gguf_dir(
+            &lmstudio_cache_dir,
+            ModelSource::LmStudio,
+            &mut models,
+            &mut seen_paths,
+        );
+    }
 
     // llama.cpp cache — on Windows use %LOCALAPPDATA%/llm-models as fallback
     let llamacpp_dir = if cfg!(windows) {
@@ -387,6 +405,91 @@ fn scan_mlx_models(
             source: ModelSource::HfCache,
         });
     }
+}
+
+/// Normalize a model name for fuzzy dedup: lowercase, strip org prefixes,
+/// strip trailing `-gguf`, and unify separators.
+fn normalize_model_name(name: &str) -> String {
+    let lower = name.to_lowercase();
+    // Strip org prefix like "nvidia/" or "qwen/"
+    let base = lower.rsplit('/').next().unwrap_or(&lower);
+    // Strip common suffixes
+    let base = base
+        .strip_suffix("-gguf")
+        .or_else(|| base.strip_suffix(".gguf"))
+        .unwrap_or(base);
+    // Unify separators
+    base.replace('_', "-")
+}
+
+pub fn add_lmstudio_models(models: &mut Vec<DiscoveredModel>, api_models: Vec<(String, u64)>) {
+    let existing_normalized: Vec<String> = models
+        .iter()
+        .filter(|m| m.source == ModelSource::LmStudio)
+        .map(|m| normalize_model_name(&m.name))
+        .collect();
+
+    for (id, size) in api_models {
+        // Skip if we already discovered this model from disk.
+        // Names differ between API (e.g. "nvidia/nemotron-3-nano-4b") and
+        // disk (e.g. "NVIDIA-Nemotron-3-Nano-4B-GGUF"), so normalize both.
+        let api_norm = normalize_model_name(&id);
+        if existing_normalized
+            .iter()
+            .any(|e| e.contains(&api_norm) || api_norm.contains(e.as_str()))
+        {
+            continue;
+        }
+        models.push(DiscoveredModel {
+            name: id.clone(),
+            path: PathBuf::from(format!("lmstudio:{id}")),
+            mmproj: None,
+            format: ModelFormat::Gguf,
+            size_bytes: size,
+            quant: parse_quant(&id),
+            param_hint: parse_params(&id),
+            max_context_size: None,
+            kv_bytes_per_token: None,
+            source: ModelSource::LmStudio,
+        });
+    }
+    models.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+}
+
+pub fn add_lemonade_models(models: &mut Vec<DiscoveredModel>, api_models: Vec<(String, u64)>) {
+    for (id, size) in api_models {
+        models.push(DiscoveredModel {
+            name: id.clone(),
+            path: PathBuf::from(format!("lemonade:{id}")),
+            mmproj: None,
+            format: ModelFormat::Gguf,
+            size_bytes: size,
+            quant: parse_quant(&id),
+            param_hint: parse_params(&id),
+            max_context_size: None,
+            kv_bytes_per_token: None,
+            source: ModelSource::Lemonade,
+        });
+    }
+    models.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+}
+
+pub fn add_fastflowlm_models(models: &mut Vec<DiscoveredModel>, api_models: Vec<(String, u64)>) {
+    for (id, size) in api_models {
+        models.push(DiscoveredModel {
+            name: id.clone(),
+            path: PathBuf::from(format!("fastflowlm:{id}")),
+            mmproj: None,
+            format: ModelFormat::Gguf,
+            size_bytes: size,
+            quant: parse_quant(&id),
+            param_hint: parse_params(&id),
+            max_context_size: None,
+            kv_bytes_per_token: None,
+            source: ModelSource::FastFlowLm,
+        });
+    }
+    models.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
 }
 
 pub fn add_ollama_models(models: &mut Vec<DiscoveredModel>, ollama_models: Vec<(String, u64)>) {
@@ -1078,6 +1181,8 @@ mod tests {
         assert_eq!(ModelSource::HfCache.to_string(), "HF Cache");
         assert_eq!(ModelSource::Ollama.to_string(), "Ollama");
         assert_eq!(ModelSource::LlmfitCache.to_string(), "llmfit");
+        assert_eq!(ModelSource::Lemonade.to_string(), "Lemonade");
+        assert_eq!(ModelSource::FastFlowLm.to_string(), "FastFlowLM");
         assert_eq!(ModelSource::ExtraDir.to_string(), "Custom");
     }
 

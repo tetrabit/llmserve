@@ -106,6 +106,23 @@ impl Default for Config {
             },
         );
 
+        presets.insert(
+            "lemonade".into(),
+            BackendPreset {
+                ctx_size: Some(4096),
+                port: Some(8000),
+                ..Default::default()
+            },
+        );
+
+        presets.insert(
+            "fastflowlm".into(),
+            BackendPreset {
+                port: Some(52625),
+                ..Default::default()
+            },
+        );
+
         Self {
             extra_model_dirs: Vec::new(),
             preferred_port: 8080,
@@ -190,6 +207,8 @@ mod tests {
         assert!(config.presets.contains_key("vllm"));
         assert!(config.presets.contains_key("koboldcpp"));
         assert!(config.presets.contains_key("localai"));
+        assert!(config.presets.contains_key("lemonade"));
+        assert!(config.presets.contains_key("fastflowlm"));
     }
 
     #[test]

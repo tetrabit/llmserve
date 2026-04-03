@@ -203,8 +203,9 @@ pub fn launch(
         Backend::KoboldCpp => launch_koboldcpp(model, config),
         Backend::LocalAi => launch_localai(model, config),
         Backend::Ollama => launch_ollama(model, config),
-        // LM Studio cannot serve local model files - it manages its own server
-        Backend::LmStudio => Err(format!(
+        Backend::Lemonade => launch_lemonade(model, config),
+        // These backends cannot serve local model files
+        Backend::LmStudio | Backend::FastFlowLm => Err(format!(
             "{} cannot serve local model files",
             backend.label()
         )),
@@ -540,6 +541,38 @@ fn launch_ollama(model: &DiscoveredModel, config: &Config) -> Result<ServerHandl
         model,
         ollama_port,
         preset.host.clone(),
+        child,
+    ))
+}
+
+fn launch_lemonade(model: &DiscoveredModel, config: &Config) -> Result<ServerHandle, String> {
+    let preset = config.preset_for("lemonade");
+
+    let mut cmd = Command::new("lemonade");
+    cmd.arg("load")
+        .arg(model.path.to_string_lossy().as_ref())
+        .arg("--host")
+        .arg(&preset.host)
+        .arg("--port")
+        .arg(preset.port.to_string())
+        .arg("--ctx-size")
+        .arg(preset.ctx_size.to_string());
+
+    for arg in &preset.extra_args {
+        cmd.arg(arg);
+    }
+
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+
+    let child = cmd
+        .spawn()
+        .map_err(|e| format!("Failed to start lemonade: {e}"))?;
+
+    Ok(make_handle(
+        Backend::Lemonade,
+        model,
+        preset.port,
+        preset.host,
         child,
     ))
 }
