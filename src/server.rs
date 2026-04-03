@@ -202,9 +202,9 @@ pub fn launch(
         Backend::Vllm => launch_vllm(model, config),
         Backend::KoboldCpp => launch_koboldcpp(model, config),
         Backend::LocalAi => launch_localai(model, config),
-        // These are blocked by the can_serve_local check above,
-        // but match exhaustively for safety.
-        Backend::Ollama | Backend::LmStudio => Err(format!(
+        Backend::Ollama => launch_ollama(model, config),
+        // LM Studio cannot serve local model files - it manages its own server
+        Backend::LmStudio => Err(format!(
             "{} cannot serve local model files",
             backend.label()
         )),
@@ -448,6 +448,101 @@ fn launch_localai(model: &DiscoveredModel, config: &Config) -> Result<ServerHand
         child,
     ))
 }
+fn launch_ollama(model: &DiscoveredModel, config: &Config) -> Result<ServerHandle, String> {
+    let preset = config.preset_for("ollama");
+
+    // Ollama runs on a fixed port (11434 by default, or OLLAMA_HOST)
+    let ollama_port = 11434u16;
+
+    // Check if this is an Ollama registry model (path like "ollama:model-name")
+    let model_path_str = model.path.to_string_lossy();
+    if model_path_str.starts_with("ollama:") {
+        // Registry model - just run it directly
+        let model_name = model_path_str.trim_start_matches("ollama:");
+        let mut cmd = Command::new("ollama");
+        cmd.arg("run").arg(model_name);
+
+        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+
+        let child = cmd
+            .spawn()
+            .map_err(|e| format!("Failed to start Ollama: {e}"))?;
+
+        return Ok(make_handle(
+            Backend::Ollama,
+            model,
+            ollama_port,
+            preset.host.clone(),
+            child,
+        ));
+    }
+
+    // Local GGUF file - need to import via Modelfile
+    // Create a unique model name from the filename
+    let model_file_name = model
+        .path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .ok_or_else(|| "Cannot determine model name from path".to_string())?;
+    let ollama_model_name = format!("local-{}", model_file_name);
+
+    // Create a Modelfile in a temporary directory
+    let temp_dir = std::env::temp_dir();
+    let modelfile_path = temp_dir.join("Modelfile");
+    let gguf_relative_path = model
+        .path
+        .file_name()
+        .ok_or_else(|| "Cannot get model filename".to_string())?;
+
+    // Write Modelfile with FROM pointing to the GGUF and PARAMETER for context size
+    let modelfile_content = format!(
+        "FROM ./{}\nPARAMETER num_ctx {}\n",
+        gguf_relative_path.to_string_lossy(),
+        preset.ctx_size
+    );
+    std::fs::write(&modelfile_path, modelfile_content)
+        .map_err(|e| format!("Failed to write Modelfile: {e}"))?;
+
+    // Get the directory containing the GGUF file for the Modelfile context
+    let model_dir = model
+        .path
+        .parent()
+        .ok_or_else(|| "Cannot determine model directory".to_string())?;
+
+    // Import the model into Ollama
+    let create_status = Command::new("ollama")
+        .args(["create", &ollama_model_name, "-f", &modelfile_path.to_string_lossy()])
+        .current_dir(model_dir)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .status()
+        .map_err(|e| format!("Failed to run ollama create: {e}"))?;
+
+    if !create_status.success() {
+        return Err(format!(
+            "ollama create failed with status: {}",
+            create_status
+        ));
+    }
+
+    // Now run the imported model
+    let mut cmd = Command::new("ollama");
+    cmd.arg("run").arg(&ollama_model_name);
+
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+
+    let child = cmd
+        .spawn()
+        .map_err(|e| format!("Failed to start Ollama: {e}"))?;
+
+    Ok(make_handle(
+        Backend::Ollama,
+        model,
+        ollama_port,
+        preset.host.clone(),
+        child,
+    ))
+}
 
 pub fn stop(handle: &mut ServerHandle) {
     // Drain any remaining output before killing
@@ -570,25 +665,9 @@ mod tests {
         assert!(err.contains("LM Studio"));
     }
 
-    #[test]
-    fn ollama_rejects_local_gguf() {
-        let config = Config::default();
-        let model = DiscoveredModel {
-            name: "test".into(),
-            path: "test.gguf".into(),
-            mmproj: None,
-            format: crate::models::ModelFormat::Gguf,
-            size_bytes: 0,
-            quant: None,
-            param_hint: None,
-            max_context_size: None,
-            kv_bytes_per_token: None,
-            source: crate::models::ModelSource::ExtraDir,
-        };
-        let result = launch(&model, &Backend::Ollama, &config);
-        assert!(result.is_err());
-        assert!(result.err().unwrap().contains("registry"));
-    }
+    // Note: Ollama now supports local GGUF via Modelfile import.
+    // Integration tests for this are in tests/serve_integration.rs
+    // since they require actual Ollama installation and model files.
 
     #[test]
     fn vllm_builds_command_for_local_gguf() {

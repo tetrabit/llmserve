@@ -29,7 +29,7 @@ impl Backend {
     pub fn can_serve_local_gguf(&self) -> bool {
         matches!(
             self,
-            Backend::LlamaServer | Backend::Vllm | Backend::KoboldCpp | Backend::LocalAi
+            Backend::LlamaServer | Backend::Vllm | Backend::KoboldCpp | Backend::LocalAi | Backend::Ollama
         )
     }
 
@@ -53,12 +53,12 @@ impl Backend {
     pub fn supports_ctx_size_override(&self) -> bool {
         matches!(
             self,
-            Backend::LlamaServer | Backend::Vllm | Backend::KoboldCpp | Backend::LocalAi
+            Backend::LlamaServer | Backend::Vllm | Backend::KoboldCpp | Backend::LocalAi | Backend::Ollama
         )
     }
 
     pub fn can_open_opencode(&self) -> bool {
-        matches!(self, Backend::LlamaServer)
+        matches!(self, Backend::LlamaServer | Backend::Vllm)
     }
 
     pub fn serve_model_reason(
@@ -84,7 +84,7 @@ impl Backend {
     pub fn local_serve_reason(&self) -> Option<&'static str> {
         match self {
             Backend::LlamaServer | Backend::KoboldCpp | Backend::MlxLm | Backend::LocalAi => None,
-            Backend::Ollama => Some("Ollama uses its own model registry, not local files"),
+            Backend::Ollama => None,
             Backend::LmStudio => Some("LM Studio manages its own server"),
             Backend::Vllm => Some("vLLM does not serve MLX model directories"),
         }
@@ -106,7 +106,8 @@ impl DetectedBackend {
                 self.binary_path.is_some()
             }
             Backend::MlxLm => self.available,
-            Backend::Ollama | Backend::LmStudio => false,
+            Backend::Ollama => self.binary_path.is_some(),
+            Backend::LmStudio => false,
         }
     }
 
@@ -210,11 +211,11 @@ fn detect_ollama() -> DetectedBackend {
     let url = std::env::var("OLLAMA_HOST").unwrap_or_else(|_| "http://localhost:11434".into());
     let agent = http_agent();
     let available = agent.get(&format!("{url}/api/tags")).call().is_ok();
-
+    let binary_path = find_binary("ollama");
     DetectedBackend {
         backend: Backend::Ollama,
         available,
-        binary_path: None,
+        binary_path,
         api_url: Some(url),
     }
 }
@@ -358,7 +359,8 @@ mod tests {
         assert!(Backend::KoboldCpp.can_serve_local_gguf());
         assert!(Backend::LocalAi.can_serve_local_gguf());
         // Cannot serve local GGUF files (use their own registries)
-        assert!(!Backend::Ollama.can_serve_local_gguf());
+        // Cannot serve local GGUF files (LM Studio uses its own registry, Ollama can serve both)
+        assert!(Backend::Ollama.can_serve_local_gguf());
         assert!(!Backend::LmStudio.can_serve_local_gguf());
         // MLX
         assert!(Backend::MlxLm.can_serve_local_mlx());
@@ -368,7 +370,7 @@ mod tests {
         assert!(Backend::LlamaServer.can_serve_local(&ModelFormat::Gguf));
         assert!(!Backend::LlamaServer.can_serve_local(&ModelFormat::Mlx));
         assert!(Backend::MlxLm.can_serve_local(&ModelFormat::Mlx));
-        assert!(!Backend::Ollama.can_serve_local(&ModelFormat::Gguf));
+        assert!(Backend::Ollama.can_serve_local(&ModelFormat::Gguf));
         assert!(Backend::LocalAi.can_serve_local(&ModelFormat::Gguf));
     }
 
@@ -398,8 +400,8 @@ mod tests {
     }
 
     #[test]
-    fn incompatible_backends_have_reasons() {
-        assert!(Backend::Ollama.local_serve_reason().is_some());
+    fn backends_without_local_serve_support_have_reasons() {
+        assert!(Backend::Ollama.local_serve_reason().is_none());
         assert!(Backend::LmStudio.local_serve_reason().is_some());
         assert!(Backend::Vllm.local_serve_reason().is_some());
         assert!(Backend::LlamaServer.local_serve_reason().is_none());
@@ -415,14 +417,14 @@ mod tests {
         assert!(Backend::KoboldCpp.supports_ctx_size_override());
         assert!(Backend::LocalAi.supports_ctx_size_override());
         assert!(!Backend::MlxLm.supports_ctx_size_override());
-        assert!(!Backend::Ollama.supports_ctx_size_override());
+        assert!(Backend::Ollama.supports_ctx_size_override());
         assert!(!Backend::LmStudio.supports_ctx_size_override());
     }
 
     #[test]
     fn opencode_support_is_explicitly_gated() {
         assert!(Backend::LlamaServer.can_open_opencode());
-        assert!(!Backend::Vllm.can_open_opencode());
+        assert!(Backend::Vllm.can_open_opencode());
         assert!(!Backend::LocalAi.can_open_opencode());
         assert!(!Backend::Ollama.can_open_opencode());
     }

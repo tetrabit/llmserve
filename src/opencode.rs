@@ -55,22 +55,36 @@ pub fn launch(session: &OpenCodeSession) -> Result<bool, String> {
 
 fn fetch_openai_model_id(base_url: &str) -> Result<String, String> {
     let url = format!("{base_url}/models");
-    let mut response = ureq::get(&url)
-        .call()
-        .map_err(|e| format!("Failed to query running server models: {e}"))?;
-    let body = response
-        .body_mut()
-        .read_to_string()
-        .map_err(|e| format!("Failed to read server model list: {e}"))?;
-    let json: serde_json::Value = serde_json::from_str(&body)
-        .map_err(|e| format!("Failed to parse server model list: {e}"))?;
-    json.get("data")
-        .and_then(|data| data.as_array())
-        .and_then(|models| models.first())
-        .and_then(|model| model.get("id"))
-        .and_then(|id| id.as_str())
-        .map(|id| id.to_string())
-        .ok_or_else(|| "Running server did not report an OpenAI-style model id".to_string())
+    let max_retries = 10;
+    let base_delay_ms = 500;
+    for attempt in 0..max_retries {
+        match ureq::get(&url).call() {
+            Ok(mut response) => {
+                let body = response
+                    .body_mut()
+                    .read_to_string()
+                    .map_err(|e| format!("Failed to read server model list: {e}"))?;
+                let json: serde_json::Value = serde_json::from_str(&body)
+                    .map_err(|e| format!("Failed to parse server model list: {e}"))?;
+                return json
+                    .get("data")
+                    .and_then(|data| data.as_array())
+                    .and_then(|models| models.first())
+                    .and_then(|model| model.get("id"))
+                    .and_then(|id| id.as_str())
+                    .map(|id| id.to_string())
+                    .ok_or_else(|| "Running server did not report an OpenAI-style model id".to_string());
+            }
+            Err(_) if attempt < max_retries - 1 => {
+                let delay = base_delay_ms * 2u64.pow(attempt as u32);
+                std::thread::sleep(std::time::Duration::from_millis(delay));
+            }
+            Err(e) => {
+                return Err(format!("Failed to query running server models: {e}"));
+            }
+        }
+    }
+    unreachable!()
 }
 
 fn write_temp_config(base_url: &str, model_id: &str, backend: &Backend) -> Result<PathBuf, String> {

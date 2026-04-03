@@ -113,6 +113,9 @@ struct ProbeSession {
     refine_attempts: u8,
     started_at: Instant,
     handle: ServerHandle,
+    keep_pinging: bool,
+    ping_failure_count: u32,
+    ping_success_count: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -927,7 +930,10 @@ impl App {
         };
 
         self.confirm_use_model_max_ctx = false;
+        self.confirm_probed_ctx = None;
+        self.confirm_use_model_max_ctx = false;
         self.confirm_common_ctx_idx = Some(next_idx);
+        self.confirm_use_hw_guess = false;
         self.confirm_use_hw_guess = false;
     }
 
@@ -1108,6 +1114,9 @@ impl App {
                         refine_attempts,
                         started_at: Instant::now(),
                         handle,
+                        keep_pinging: false,
+                        ping_failure_count: 0,
+                        ping_success_count: 0,
                     });
                     return;
                 }
@@ -1903,9 +1912,9 @@ mod tests {
 
     #[test]
     fn choose_opencode_server_rejects_unsupported_backend_matches() {
-        let mut servers = vec![dummy_server(Backend::Vllm, "qwen", 8080)];
+        let mut servers = vec![dummy_server(Backend::LocalAi, "qwen", 8080)];
         assert_eq!(
-            choose_opencode_server_idx(&servers, "qwen", Some(&Backend::Vllm)),
+            choose_opencode_server_idx(&servers, "qwen", Some(&Backend::LocalAi)),
             None
         );
         for server in &mut servers {
